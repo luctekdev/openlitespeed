@@ -2994,6 +2994,9 @@ int HttpReq::processPath(const char *pURI, int uriLen, char *pBuf,
             if (!m_pContext->isAppContext())
                 LS_DBG_L(getLogSession(), "Index file is not available in [%s].",
                          pBuf);
+            //Apache answers 403 for a directory it will not list.
+            if (m_pVHost->isHtaLive() && !m_pContext->isAppContext())
+                return SC_403;
             return SC_404; //can't find a index file
         }
     }
@@ -4741,6 +4744,18 @@ int HttpReq::applyOps(HttpSession * pSession,
             if (iter->isComplexValue() || iter->getEnv())
                 return LS_AGAIN;
         }
+        if (iter->isOnSuccess() && getStatusCode() >= SC_400)
+            continue;
+        if (iter->getEnv())
+        {
+            const char *pName = iter->getEnv()->c_str();
+            int nameLen = iter->getEnv()->len();
+            int negate = (*pName == '!');
+            int valLen = 0;
+            const char *pVal = getEnv(pName + negate, nameLen - negate, valLen);
+            if ((pVal && valLen > 0) == negate)
+                continue;
+        }
         applyOp(pSession, pRespHeader, iter);
     }
     return LS_OK;
@@ -4772,12 +4787,15 @@ int HttpReq::applyHeaderOps(HttpSession * pSession,
                          linksOnly) != LS_OK)
                 return LS_AGAIN;
     }
+    int ret = 0;
     if (m_pContext && m_pContext->getHeaderOps())
-    {
-        return applyOps(pSession, pRespHeader, m_pContext->getHeaderOps(), 0,
-                        linksOnly);
-    }
-    return 0;
+        ret = applyOps(pSession, pRespHeader, m_pContext->getHeaderOps(), 0,
+                       linksOnly);
+    if (!ret && m_pFMContext && m_pFMContext->getHeaderOps()
+        && (m_pFMContext->getConfigBits() & BIT_EXTRA_HEADER))
+        ret = applyOps(pSession, pRespHeader, m_pFMContext->getHeaderOps(), 1,
+                       linksOnly);
+    return ret;
 }
 
 

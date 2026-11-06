@@ -444,6 +444,7 @@ private:
     int  doWrite();
     int  doRead();
     int processURI(int resume);
+    friend class Htaccess;
     int checkAuthentication(const HTAuth *pHTAuth,
                             const AuthRequired *pRequired, int resume);
 

@@ -654,7 +654,8 @@ HeaderOp *HttpHeaderOps::append(int16_t index, const char *pName,
 }
 
 
-int HttpHeaderOps::parseOp(const char *pBegin, const char *pEnd, int is_req)
+int HttpHeaderOps::parseOp(const char *pBegin, const char *pEnd, int is_req,
+                           int onSuccess)
 {
     int op = -1;
     int index;
@@ -682,6 +683,8 @@ int HttpHeaderOps::parseOp(const char *pBegin, const char *pEnd, int is_req)
             || (pNameEnd - pNameBegin == 9
                 && strncasecmp(pNameBegin, "onsuccess", 9) == 0)))
     {
+        if (tolower(*pNameBegin) == 'a')
+            onSuccess = 0;
         pNameBegin += 7;
         if (tolower(*pNameBegin) == 'o')
             pNameBegin += 3;
@@ -787,5 +790,7 @@ int HttpHeaderOps::parseOp(const char *pBegin, const char *pEnd, int is_req)
         return LS_FAIL;
     if (pEnv)
         pHeader->setEnv(pEnv, pEnvEnd - pEnv);
+    if (onSuccess && !is_req)
+        pHeader->setOnSuccess();
     return 0;
 }

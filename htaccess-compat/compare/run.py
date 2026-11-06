@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import http.client
 import os
+import re
 import shutil
 import socket
 import sys
@@ -70,7 +71,13 @@ def normalize_location(value):
 
 
 def normalize_cache_control(value):
-    return value.replace(" ", "").lower()
+    # "public" nas respostas do OLS não muda o significado de max-age.
+    return value.replace(" ", "").lower().replace("public,", "")
+
+
+def normalize_list(value):
+    # "a,b" e "a, b" são o mesmo valor em HTTP.
+    return re.sub(r",\s*", ", ", value)
 
 
 def compare(apache, ols, case):
@@ -99,6 +106,8 @@ def compare(apache, ols, case):
             left, right = normalize_cache_control(left), normalize_cache_control(right)
         elif name in TIME_HEADERS and left and right:
             continue
+        elif left and right:
+            left, right = normalize_list(left), normalize_list(right)
         if left != right:
             diffs.append(f"{name}: apache={left!r} ols={right!r}")
 

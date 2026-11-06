@@ -131,6 +131,7 @@ set(OLS_UNITTEST_FULL_SRCS
    h2/unpackedheaderstest.cpp
    http/httpiptogeo2test.cpp
    http/expirestest.cpp
+   http/htaccesstest.cpp
    http/rewritetest.cpp
    http/httprequestlinetest.cpp
    http/httprangetest.cpp

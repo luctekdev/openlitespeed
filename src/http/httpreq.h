@@ -779,6 +779,11 @@ public:
     }
     const HttpContext *getContext() const   {   return m_pContext;          }
     const HttpContext *getFMContext() const {   return m_pFMContext;        }
+    void setHtAuth(const HTAuth *pAuth, const AuthRequired *pRequired)
+    {
+        m_pHTAuth = pAuth;
+        m_pAuthRequired = pRequired;
+    }
 
     void incRedirects()                     {   ++m_iRedirects;             }
     short getRedirects() const              {   return m_iRedirects;        }

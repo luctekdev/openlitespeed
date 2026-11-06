@@ -31,6 +31,7 @@
 #include <http/handlerfactory.h>
 #include <http/handlertype.h>
 #include <http/hiochainstream.h>
+#include <http/htaccess.h>
 #include <http/htauth.h>
 #include <http/httpcgitool.h>
 #include <http/httphandler.h>
@@ -2390,6 +2391,7 @@ int HttpSession::processContextMap()
     else
     {
         pCtx = (HttpContext *)m_request.getContext();
+        Htaccess::applyEnv(this);
         if (shouldUpgradeWebSocket(pCtx))
             setProcessState(HSPS_CHECK_AUTH_ACCESS);
         else
@@ -2417,6 +2419,12 @@ int HttpSession::processContextRewrite()
         return 0;
     }
 
+    //Apache checks access before per-directory rewrites. A rule must not be able
+    //to move a request out of a protected directory before that happens.
+    ret = Htaccess::checkAccess(this);
+    if (ret)
+        return ret;
+
     while ((!pContext->hasRewriteConfig())
             && (pContext->getParent())
             && (pContext->getParent() != pVHostRoot))
@@ -2428,7 +2436,7 @@ int HttpSession::processContextRewrite()
                 "[REWRITE] Rewrite engine is not enabled for context '%s'",
                 pContext->getContextURI()->c_str());
         setProcessState(HSPS_HKPT_URI_MAP);
-        return 0;
+        return Htaccess::checkRedirect(this);
     }
     ret = RewriteEngine::getInstance().processRuleSet(
                                                 pContext->getRewriteRules(),
@@ -2480,7 +2488,11 @@ int HttpSession::processContextRewrite()
         return authWebSocketUpgrade(m_request.getContext());
     }
     else
+    {
         setProcessState(HSPS_HKPT_URI_MAP);
+        if (!ret)
+            ret = Htaccess::checkRedirect(this);
+    }
 
     return ret;
 }
@@ -2551,6 +2563,9 @@ int HttpSession::processContextAuth()
 
     if (!m_request.getContextState(CONTEXT_AUTH_CHECKED | KEEP_AUTH_INFO))
     {
+        ret1 = Htaccess::checkAccess(this);
+        if (ret1)
+            return ret1;
         m_request.getAAAData(aaa, satisfyAny);
         m_request.orContextState(CONTEXT_AUTH_CHECKED);
         int satisfy = 0;

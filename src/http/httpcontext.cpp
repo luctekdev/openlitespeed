@@ -21,6 +21,7 @@
 #include <http/contextlist.h>
 #include <http/handlerfactory.h>
 #include <http/handlertype.h>
+#include <http/htaccess.h>
 #include <http/htauth.h>
 #include <http/httplog.h>
 #include <http/httpmime.h>
@@ -78,6 +79,7 @@ HttpContext::HttpContext()
     , m_pRewriteRules(NULL)
     , m_pParent(NULL)
     , m_htaStamp()
+    , m_pHtaRules(NULL)
 {
 }
 
@@ -93,6 +95,8 @@ HttpContext::~HttpContext()
         delete m_pURIMatch;
     if (m_pRewriteBase)
         delete m_pRewriteBase;
+    if (m_iConfigBits2 & BIT2_HTA_OWN_RULES)
+        Htaccess::releaseRules(m_pHtaRules);
     releaseHTAConf();
 
     if ((m_iConfigBits & BIT_CTXINT))
@@ -100,7 +104,7 @@ HttpContext::~HttpContext()
 }
 
 int HttpContext::setHeaderOps(const char *pLogId, const char *pHeaders,
-                              int len)
+                              int len, int onSuccess)
 {
     if (allocateInternal())
         return -1;
@@ -136,7 +140,7 @@ int HttpContext::setHeaderOps(const char *pLogId, const char *pHeaders,
             }
             StringTool::strTrim(pLineBegin, pCurEnd);
             if (m_pInternal->m_pHeaderOps->parseOp(pLineBegin, pCurEnd,
-                                                   is_req) == -1)
+                                                   is_req, onSuccess) == -1)
             {
                 char *p = (char *)pCurEnd;
                 *p = '0';
@@ -610,6 +614,10 @@ void HttpContext::inherit(const HttpContext *pRootContext)
 {
     if (!m_pParent)
         return;
+    if (m_iConfigBits2 & BIT2_HTA_OWN_RULES)
+        Htaccess::setParentRules(m_pHtaRules, m_pParent->m_pHtaRules);
+    else
+        m_pHtaRules = m_pParent->m_pHtaRules;
     if (!m_pHandler)
         m_pHandler = m_pParent->m_pHandler;
     if (!(m_iConfigBits & BIT_CTXINT))

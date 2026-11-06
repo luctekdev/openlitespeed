@@ -69,3 +69,10 @@ FROM build AS runtime
 RUN cd /work/openlitespeed && ./install.sh
 EXPOSE 8088 7080
 CMD ["/usr/local/lsws/bin/openlitespeed", "-n"]
+
+# Servidor com ASan, para rodar a comparação e os testes de carga.
+#   OLS_IMAGE=ols-htaccess:asan docker compose ...
+FROM runtime AS asan
+
+COPY --from=test /work/openlitespeed/build-test/src/openlitespeed /usr/local/lsws/bin/openlitespeed
+ENV ASAN_OPTIONS=detect_leaks=0:abort_on_error=0:log_path=/tmp/asan

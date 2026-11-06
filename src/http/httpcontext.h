@@ -50,6 +50,7 @@ class HttpSession;
 class ModuleConfig;
 class HttpSessionHooks;
 class HttpHeaderOps;
+class HtaRules;
 
 #define UID_SERVER          0
 #define UID_FILE            1
@@ -152,6 +153,7 @@ class HttpHeaderOps;
 //Dynamic context that shadows a configured context with the same URI
 #define BIT2_HTA_OVERLAY        (1<<25)
 #define BIT2_HTA_HAS_OVERLAY    (1<<26)
+#define BIT2_HTA_OWN_RULES      (1<<27)
 
 
 //last bit, if set, is a NULL context
@@ -251,6 +253,7 @@ class HttpContext
     RewriteRuleList      *m_pRewriteRules;
     const HttpContext    *m_pParent;
     HtaStamp              m_htaStamp;
+    HtaRules             *m_pHtaRules;
 
     void releaseHTAuth();
     void releaseAccessControl();
@@ -504,7 +507,8 @@ public:
 
     //HttpContext * dup() const;
 
-    int setHeaderOps(const char *pLogId, const char *pHeaders, int len);
+    int setHeaderOps(const char *pLogId, const char *pHeaders, int len,
+                     int onSuccess = 0);
     const HttpHeaderOps *getHeaderOps() const
     {   return m_pInternal->m_pHeaderOps;     }
 
@@ -582,6 +586,8 @@ public:
     uint32_t getConfigBits2() const     {   return m_iConfigBits2;   }
 
     HtaStamp &getHtaStamp()             {   return m_htaStamp;       }
+    HtaRules *getHtaRules() const       {   return m_pHtaRules;      }
+    void setHtaRules(HtaRules *pRules)  {   m_pHtaRules = pRules;    }
     int isHtaDir() const;
 
 

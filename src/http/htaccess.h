@@ -17,12 +17,34 @@
 #ifndef HTACCESS_H
 #define HTACCESS_H
 
+#include <string>
+#include <vector>
+
 class HttpContext;
+class HttpSession;
 class HttpVHost;
+class HtaRules;
 struct HtaStamp;
 
+/** One directive, or one block with its children, as written in the file. */
+struct HtaDirective
+{
+    std::string                 m_sName;
+    std::string                 m_sLine;    //the text after continuation lines are joined
+    std::vector<std::string>    m_args;
+    std::vector<HtaDirective>   m_children;
+    int                         m_iLine;
+    bool                        m_bBlock;
+
+    HtaDirective()
+        : m_iLine(0)
+        , m_bBlock(false)
+    {}
+};
+
 /**
- * Applies .htaccess files to runtime contexts.
+ * Applies .htaccess files to runtime contexts and evaluates at request time the
+ * directives that the rest of the server has no equivalent for.
  */
 class Htaccess
 {
@@ -35,6 +57,19 @@ public:
      * HttpContext::inherit(), which merges the parent values into what is set here.
      */
     static int load(HttpVHost *pVHost, HttpContext *pContext);
+
+    /** Parses text into directives. Returns the line of the first error or 0. */
+    static int parse(const char *pText, std::vector<HtaDirective> &directives);
+
+    static void applyEnv(HttpSession *pSession);
+
+    /** Returns 0 to let the request continue, otherwise an HTTP status. */
+    static int  checkAccess(HttpSession *pSession);
+    static int  checkRedirect(HttpSession *pSession);
+
+    /** The rules are created by load() and owned by a context. */
+    static void releaseRules(HtaRules *pRules);
+    static void setParentRules(HtaRules *pRules, const HtaRules *pParent);
 };
 
 #endif

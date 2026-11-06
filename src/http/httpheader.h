@@ -152,6 +152,7 @@ public:
         FLAG_RELEASE_VALUE = 2,
         FLAG_INHERITED     = 4,
         FLAG_COMPLEX_VALUE = 8,
+        FLAG_ONSUCCESS     = 16,  //Apache: skipped on error responses
         FLAG_RELEASE_ENV   = 32,
         FLAG_REQ_HDR_OP    = 64,
     };
@@ -192,6 +193,8 @@ public:
 
     char isInherited() const    {   return m_iFlag & FLAG_INHERITED;        }
     char isComplexValue() const {   return m_iFlag & FLAG_COMPLEX_VALUE;    }
+    char isOnSuccess() const    {   return m_iFlag & FLAG_ONSUCCESS;        }
+    void setOnSuccess()         {   m_iFlag |= FLAG_ONSUCCESS;              }
 
     char isReqHeader() const    {   return m_iFlag & FLAG_REQ_HDR_OP;       }
 
@@ -253,7 +256,8 @@ public:
                      int8_t op = LSI_HEADER_ADD, int is_req = 0);
 
     void inherit(const HttpHeaderOps &parent);
-    int parseOp(const char *pLineBegin, const char *pCurEnd, int is_req);
+    int parseOp(const char *pLineBegin, const char *pCurEnd, int is_req,
+                int onSuccess = 0);
     short has_req_op() const    {   return m_has_req_op;    }
     short has_resp_op() const   {   return m_has_resp_op;   }
     bool hasLinkOp() const      {   return m_hasLinkOp;    }
