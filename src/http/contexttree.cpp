@@ -19,6 +19,7 @@
 #include <http/contextnode.h>
 #include <http/httpcontext.h>
 #include <http/contextlist.h>
+#include <util/gpointerlist.h>
 #include <util/pool.h>
 #include <util/stringlist.h>
 
@@ -136,6 +137,81 @@ HttpContext *ContextTree::removeMatchContext(const char *pURI)
         return pMatched;
     }
     return NULL;
+}
+
+
+ContextNode *ContextTree::findUriNode(const char *pURI)
+{
+    int len;
+    getPrefix(len);
+    if (!pURI[len])
+        return m_pRootNode;
+    return m_pRootNode->find(pURI + len);
+}
+
+
+ContextNode *ContextTree::findLocNode(const char *pLocation)
+{
+    if (!pLocation
+        || strncmp(pLocation, m_pLocRootPath, m_iLocRootPathLen) != 0)
+        return NULL;
+    if (!pLocation[m_iLocRootPathLen])
+        return m_pLocRootNode;
+    return findNode(pLocation);
+}
+
+
+void ContextTree::detachHtaNode(ContextNode *pNode,
+                                TPointerList<HttpContext> &detached)
+{
+    ChildNodeList *pChildren = pNode->getChildren();
+    if (pChildren)
+    {
+        ChildNodeList::iterator iter = pChildren->begin();
+        while (iter != pChildren->end())
+        {
+            detachHtaNode(iter.second(), detached);
+            iter = pChildren->next(iter);
+        }
+    }
+    HttpContext *pContext = pNode->getContext();
+    if (!pContext || !(pContext->getConfigBits2() & BIT2_HTA_DYNAMIC))
+        return;
+
+    HttpContext *pConfigured = NULL;
+    if (pContext->getConfigBits2() & BIT2_HTA_OVERLAY)
+    {
+        pConfigured = (HttpContext *)pContext->getParent();
+        pConfigured->setConfigBit2(BIT2_HTA_HAS_OVERLAY, 0);
+    }
+    pNode->setContext(pConfigured);
+    ContextNode *pLocNode = findLocNode(pContext->getLocation());
+    if (pLocNode && pLocNode->getContext() == pContext)
+        pLocNode->setContext(pConfigured);
+    detached.push_back(pContext);
+}
+
+
+void ContextTree::detachHta(const HttpContext *pContext,
+                            TPointerList<HttpContext> &detached)
+{
+    ContextNode *pNode = findUriNode(pContext->getURI());
+    if (pNode)
+        detachHtaNode(pNode, detached);
+}
+
+
+void ContextTree::attachHtaOverlay(HttpContext *pConfigured,
+                                   HttpContext *pOverlay)
+{
+    ContextNode *pNode = findUriNode(pConfigured->getURI());
+    if (!pNode || pNode->getContext() != pConfigured)
+        return;
+    pNode->setContext(pOverlay);
+    ContextNode *pLocNode = findLocNode(pConfigured->getLocation());
+    if (pLocNode && pLocNode->getContext() == pConfigured)
+        pLocNode->setContext(pOverlay);
+    pConfigured->setConfigBit2(BIT2_HTA_HAS_OVERLAY, 1);
 }
 
 

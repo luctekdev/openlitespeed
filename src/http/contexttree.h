@@ -25,6 +25,7 @@ class ContextNode;
 class HttpVHost;
 class StringList;
 class HttpHandler;
+template< typename T > class TPointerList;
 
 class ContextTree
 {
@@ -36,6 +37,10 @@ class ContextTree
 
     ContextTree(const ContextTree &rhs);
     void operator=(const ContextTree &rhs);
+    ContextNode *findUriNode(const char *pURI);
+    ContextNode *findLocNode(const char *pLocation);
+    void detachHtaNode(ContextNode *pNode,
+                       TPointerList<HttpContext> &detached);
 
 public:
     ContextTree();
@@ -54,6 +59,15 @@ public:
                          char *pStart, long lastCheck = 0);
 
     HttpContext *removeMatchContext(const char *pURI);
+
+    /**
+     * Removes the runtime contexts at and below pContext from the tree and
+     * appends them to detached. They must stay allocated until no request
+     * can refer to them. Configured contexts are left in place.
+     */
+    void detachHta(const HttpContext *pContext,
+                   TPointerList<HttpContext> &detached);
+    void attachHtaOverlay(HttpContext *pConfigured, HttpContext *pOverlay);
 
     int add(HttpContext *pContext);
     const HttpContext *bestMatch(const char *pURI, int len) const;

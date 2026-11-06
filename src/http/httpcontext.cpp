@@ -77,6 +77,7 @@ HttpContext::HttpContext()
     , m_pRewriteBase(NULL)
     , m_pRewriteRules(NULL)
     , m_pParent(NULL)
+    , m_htaStamp()
 {
 }
 
@@ -150,6 +151,13 @@ int HttpContext::setHeaderOps(const char *pLogId, const char *pHeaders,
             ++pLineBegin;
     }
     return 0;
+}
+
+
+int HttpContext::isHtaDir() const
+{
+    return m_pHandler && getLocation() && !(m_iConfigBits2 & BIT2_NULL_CONTEXT)
+           && m_pHandler->getType() == HandlerType::HT_NULL;
 }
 
 

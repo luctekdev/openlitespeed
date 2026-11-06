@@ -147,6 +147,11 @@ class HttpHeaderOps;
 
 #define BIT2_IPTOLOC            (1<<22)
 #define BIT2_CHECK_CAPTCHA      (1<<23)
+//Created at runtime from the file system, can be discarded and rebuilt
+#define BIT2_HTA_DYNAMIC        (1<<24)
+//Dynamic context that shadows a configured context with the same URI
+#define BIT2_HTA_OVERLAY        (1<<25)
+#define BIT2_HTA_HAS_OVERLAY    (1<<26)
 
 
 //last bit, if set, is a NULL context
@@ -179,6 +184,17 @@ struct AAAData
     const AuthRequired   *m_pRequired;
     const AccessControl *m_pAccessCtrl;
     const HttpHandler    *m_pAuthorizer;
+};
+
+//Identity of the .htaccess file a context was built from
+struct HtaStamp
+{
+    time_t  m_tmCheck;
+    time_t  m_tmMod;
+    long    m_lNsec;
+    off_t   m_iSize;
+    ino_t   m_iIno;
+    char    m_iPresent;
 };
 
 typedef struct _CTX_INT
@@ -234,6 +250,7 @@ class HttpContext
     AutoStr2             *m_pRewriteBase;
     RewriteRuleList      *m_pRewriteRules;
     const HttpContext    *m_pParent;
+    HtaStamp              m_htaStamp;
 
     void releaseHTAuth();
     void releaseAccessControl();
@@ -563,6 +580,9 @@ public:
     void setConfigBit2(uint32_t bit, int enable)
     {   m_iConfigBits2 = (m_iConfigBits2 & (~bit)) | ((enable) ? bit : 0); }
     uint32_t getConfigBits2() const     {   return m_iConfigBits2;   }
+
+    HtaStamp &getHtaStamp()             {   return m_htaStamp;       }
+    int isHtaDir() const;
 
 
     void setFileEtag(int a)

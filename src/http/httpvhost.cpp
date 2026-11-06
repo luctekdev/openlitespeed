@@ -24,6 +24,7 @@
 #include <http/handlerfactory.h>
 #include <http/handlertype.h>
 #include <http/hotlinkctrl.h>
+#include <http/htaccess.h>
 #include <http/htauth.h>
 #include <http/httplog.h>
 #include <http/httpmime.h>
@@ -262,6 +263,9 @@ HttpVHost::HttpVHost(const char *pHostName)
     , m_iRewriteLogLevel(0)
     , m_iGlobalMatchContext(1)
     , m_iEarlyHints(-1)
+    , m_iHtaMode(HTA_COMPAT)
+    , m_iHtaCheckInterval(1)
+    , m_iHtaGraveTicks(0)
     , m_iFeatures(VH_ENABLE | VH_SERVER_ENABLE |
                   VH_ENABLE_SCRIPT | LS_ALWAYS_FOLLOW |
                   VH_GZIP)
@@ -325,6 +329,8 @@ HttpVHost::~HttpVHost()
         delete m_pAwstats;
     if (m_pSSLCtx && !m_parentSsl)
         delete m_pSSLCtx;
+    m_htaGrave.release_objects();
+    m_htaGraveOld.release_objects();
     m_pUrlStxFileHash->release_objects();
     delete m_pUrlStxFileHash;
     LsiapiBridge::releaseModuleData(LSI_DATA_VHOST, &m_moduleData);
@@ -458,6 +464,7 @@ void HttpVHost::setAdminEmails(const char *pEmails)
 void HttpVHost::onTimer30Secs()
 {
     urlStaticFileHashClean();
+    htaRotateGrave();
 }
 
 
@@ -705,11 +712,108 @@ bool HttpVHost::dirMatch(HttpContext * &pContext, const char *pURI,
 }
 
 
+/**
+ * Tells whether the .htaccess of a directory differs from the one its context
+ * was built from. The result is 1 at most once per check interval.
+ */
+int HttpVHost::htaChanged(HttpContext *pContext)
+{
+    HtaStamp &stamp = pContext->getHtaStamp();
+    if (m_iHtaCheckInterval > 0
+        && DateTime::s_curTime - stamp.m_tmCheck < m_iHtaCheckInterval)
+        return 0;
+    stamp.m_tmCheck = DateTime::s_curTime;
+
+    HtaStamp cur;
+    Htaccess::stat(pContext->getLocation(), cur);
+    return (cur.m_iPresent != stamp.m_iPresent)
+           || (cur.m_iPresent && (cur.m_tmMod != stamp.m_tmMod
+                                  || cur.m_lNsec != stamp.m_lNsec
+                                  || cur.m_iSize != stamp.m_iSize
+                                  || cur.m_iIno != stamp.m_iIno));
+}
+
+
+/**
+ * Configured contexts are never modified at runtime, so that removing the
+ * .htaccess restores them. A context with the same URI shadows them instead.
+ */
+void HttpVHost::htaAddOverlay(HttpContext *pConfigured)
+{
+    HtaStamp cur;
+    Htaccess::stat(pConfigured->getLocation(), cur);
+    if (!cur.m_iPresent)
+        return;
+
+    HttpContext *pOverlay = new HttpContext();
+    if (setContext(pOverlay, pConfigured->getURI(), HandlerType::HT_NULL,
+                   pConfigured->getLocation(), NULL,
+                   pConfigured->allowBrowse(), 0) == NULL)
+        return;
+    pOverlay->setConfigBit2(BIT2_HTA_DYNAMIC | BIT2_HTA_OVERLAY, 1);
+    pOverlay->setParent(pConfigured);
+    Htaccess::load(this, pOverlay);
+    pOverlay->inherit(&m_rootContext);
+    m_contexts.attachHtaOverlay(pConfigured, pOverlay);
+}
+
+
+/**
+ * Rebuilding is what makes reloads safe: inherit() accumulates values and child
+ * contexts share data with their parent, so the affected contexts are replaced
+ * instead of updated, and the next lookup creates them again.
+ */
+HttpContext *HttpVHost::htaRefresh(HttpContext *pContext, const char *pURI,
+                                   size_t iUriLen)
+{
+    HttpContext *pChanged = NULL;
+    for (HttpContext *p = pContext; p && p != &m_rootContext;
+         p = (HttpContext *)p->getParent())
+    {
+        if (p->isHtaDir() && !(p->getConfigBits2() & BIT2_HTA_HAS_OVERLAY)
+            && htaChanged(p))
+            pChanged = p;
+    }
+    if (!pChanged)
+        return pContext;
+
+    HttpContext *pConfigured = pChanged;
+    if (pChanged->getConfigBits2() & BIT2_HTA_OVERLAY)
+        pConfigured = (HttpContext *)pChanged->getParent();
+    else if (pChanged->getConfigBits2() & BIT2_HTA_DYNAMIC)
+        pConfigured = NULL;
+
+    LS_DBG_L("[%s] .htaccess changed in %s, rebuilding contexts.",
+             getName(), pChanged->getLocation());
+    m_contexts.detachHta(pChanged, m_htaGrave);
+    if (pConfigured)
+        htaAddOverlay(pConfigured);
+    return (HttpContext *)m_contexts.bestMatch(pURI, iUriLen);
+}
+
+
+/**
+ * Sessions keep plain pointers to their context. Detached contexts are freed
+ * only after surviving a full rotation, which is 30 to 60 minutes.
+ */
+void HttpVHost::htaRotateGrave()
+{
+    if (++m_iHtaGraveTicks < 60)
+        return;
+    m_iHtaGraveTicks = 0;
+    m_htaGraveOld.release_objects();
+    m_htaGraveOld.swap(m_htaGrave);
+}
+
+
 HttpContext *HttpVHost::bestMatch(const char *pURI, size_t iUriLen)
 {
     HttpContext *pContext = (HttpContext *)m_contexts.bestMatch(pURI, iUriLen);
     LS_DBG_L(ConfigCtx::getCurConfigCtx(), "HttpVHost::bestMatch %.*s (len %d) return %p, loc %s.",
              (int)iUriLen, pURI, (int)iUriLen, pContext, pContext ? pContext->getLocation() : "nil");
+
+    if (pContext && isHtaLive())
+        pContext = htaRefresh(pContext, pURI, iUriLen);
 
     AutoStr2 missURI; //A while URI start with /
     AutoStr2 missLoc;  //A loc should be added to pContext location for the full path
@@ -721,6 +825,15 @@ HttpContext *HttpVHost::bestMatch(const char *pURI, size_t iUriLen)
 
         lstrncpy(achRealPath + locLen, missLoc.c_str(), sizeof(achRealPath) - locLen);
 
+        //No context for a missing directory: URIs are chosen by the client and
+        //contexts are never freed, so that would grow without limit.
+        if (access(achRealPath, F_OK) != 0)
+        {
+            LS_DBG_L(ConfigCtx::getCurConfigCtx(), "path %s not accessible.",
+                     achRealPath);
+            break;
+        }
+
         HttpContext *pContext0 = addContext(missURI.c_str(), HandlerType::HT_NULL,
                               achRealPath, NULL, 1);
         LS_DBG_H(ConfigCtx::getCurConfigCtx(), "Tried to add new context: "
@@ -729,23 +842,12 @@ HttpContext *HttpVHost::bestMatch(const char *pURI, size_t iUriLen)
         if (pContext0 == NULL)
             break;
 
-        if (access(achRealPath, F_OK) != 0)
-        {
-            pContext0->setConfigBit2(BIT2_NULL_CONTEXT, 1);
-
-            LS_DBG_L(ConfigCtx::getCurConfigCtx(),
-                     "path %s not accessible, added null context %p.",
-                     achRealPath, pContext0);
-
-
-
-
-            break;
-        }
-
+        pContext0->setConfigBit2(BIT2_HTA_DYNAMIC, 1);
+        if (isHtaLive())
+            Htaccess::load(this, pContext0);
         pContext0->inherit(pContext);
         pContext = pContext0;
-        if (enableAutoLoadHt())
+        if (enableAutoLoadHt() && !isHtaLive())
         {
             //If have .htaccess in this DIR, load it
             lstrncat(achRealPath, ".htaccess", sizeof(achRealPath));
@@ -1268,6 +1370,21 @@ int HttpVHost::configRewrite(const XmlNode *pNode)
     int defVal = (HttpServerConfig::getInstance().getAutoLoadHtaccess());
     enableAutoLoadHt(ConfigCtx::getCurConfigCtx()->getLongValue(pNode,
                                 "autoLoadHtaccess", 0, 1, defVal));
+    const char *pHtaMode = pNode->getChildValue("htaccessMode");
+    if (pHtaMode)
+    {
+        if (strcasecmp(pHtaMode, "off") == 0)
+            m_iHtaMode = HTA_OFF;
+        else if (strcasecmp(pHtaMode, "strict") == 0)
+            m_iHtaMode = HTA_STRICT;
+        else if (strcasecmp(pHtaMode, "compat") == 0)
+            m_iHtaMode = HTA_COMPAT;
+        else
+            LS_WARN(ConfigCtx::getCurConfigCtx(),
+                    "Invalid htaccessMode '%s', using 'compat'.", pHtaMode);
+    }
+    m_iHtaCheckInterval = ConfigCtx::getCurConfigCtx()->getLongValue(pNode,
+                                "htaccessCheckInterval", 0, 3600, 1);
 
     configRewriteMap(pNode);
 
@@ -2918,7 +3035,8 @@ int HttpVHost::configContext(const XmlNode *pContextNode)
             pContext->setGeoIP(val);
         pContext->setIpToLoc(m_rootContext.isIpToLocOn());
         return pContext->config(getRewriteMaps(), pContextNode, type,
-                                getRootContext(), enableAutoLoadHt());
+                                getRootContext(),
+                                enableAutoLoadHt() && !isHtaLive());
     }
 
     return LS_FAIL;
@@ -2990,7 +3108,7 @@ int HttpVHost::configVHContextList(const XmlNode *pVhConfNode,
         }
     }
 
-    if (!slashCtxCfgRewrite && enableAutoLoadHt())
+    if (!slashCtxCfgRewrite && enableAutoLoadHt() && !isHtaLive())
     {
         HttpContext *pSlashContext = getContext("/", 1);
         assert(pSlashContext != NULL);

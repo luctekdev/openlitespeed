@@ -19,6 +19,7 @@
 #define HTTPVHOST_H
 
 #include <http/contexttree.h>
+#include <util/gpointerlist.h>
 #include <http/httpcontext.h>
 #include <http/httplogsource.h>
 #include <http/reqstats.h>
@@ -162,6 +163,12 @@ public:
     };
 
 private:
+    int          htaChanged(HttpContext *pContext);
+    HttpContext *htaRefresh(HttpContext *pContext, const char *pURI,
+                            size_t iUriLen);
+    void         htaAddOverlay(HttpContext *pConfigured);
+    void         htaRotateGrave();
+
     ReqStats            m_reqStats;
     AccessLog          *m_pAccessLog[MAX_ACCESS_LOG];
     LOG4CXX_NS::Logger *m_pLogger;
@@ -173,11 +180,16 @@ private:
     char                m_iRewriteLogLevel;
     char                m_iGlobalMatchContext;
     int8_t              m_iEarlyHints;
+    int8_t              m_iHtaMode;
+    int16_t             m_iHtaCheckInterval;
+    int16_t             m_iHtaGraveTicks;
 
     uint32_t            m_iFeatures;
 
     ContextTree         m_contexts;
     HttpContext         m_rootContext;
+    TPointerList<HttpContext> m_htaGrave;
+    TPointerList<HttpContext> m_htaGraveOld;
     AutoStr2            m_sVhRoot;
     AccessCache        *m_pAccessCache;
     HotlinkCtrl        *m_pHotlinkCtrl;
@@ -273,6 +285,17 @@ public:
     bool dirMatch(HttpContext * &pContext, const char *pURI, size_t iUriLen,
                   AutoStr2 *missingDir, AutoStr2 *missLoc) const;
     HttpContext *bestMatch(const char *pURI, size_t iUriLen);
+
+    enum
+    {
+        HTA_OFF,
+        HTA_COMPAT,
+        HTA_STRICT
+    };
+    //.htaccess files are followed at runtime instead of read once
+    int  isHtaLive() const
+    {   return enableAutoLoadHt() && m_iHtaMode != HTA_OFF;   }
+    int  getHtaMode() const             {   return m_iHtaMode;      }
 
     const HttpContext *matchLocation(const char *pURI, size_t iUriLen,
                                      int regex = 0) const;
