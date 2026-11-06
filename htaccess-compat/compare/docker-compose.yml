@@ -1,0 +1,37 @@
+# Comparação Apache x OLS sobre o mesmo docroot.
+#
+# Antes, gere a imagem do OLS a partir da raiz do repositório:
+#   docker build -f htaccess-compat/docker/ols.Dockerfile --target runtime -t ols-htaccess:runtime .
+#
+# Depois, nesta pasta:
+#   docker compose run --rm runner
+
+services:
+  apache:
+    image: httpd:2.4
+    volumes:
+      - ./apache/httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
+      - www:/www:ro
+
+  ols:
+    image: ${OLS_IMAGE:-ols-htaccess:runtime}
+    volumes:
+      - ./ols/httpd_config.conf:/usr/local/lsws/conf/httpd_config.conf:ro
+      - ./ols/vhconf.conf:/usr/local/lsws/conf/vhosts/compat/vhconf.conf:ro
+      - www:/www:ro
+
+  runner:
+    image: python:3.12-slim
+    profiles: ["run"]
+    working_dir: /compare
+    command: ["python", "-B", "run.py", "--www", "/www", "--report", "/report/report.md"]
+    depends_on:
+      - apache
+      - ols
+    volumes:
+      - ./:/compare:ro
+      - ./report:/report
+      - www:/www
+
+volumes:
+  www:

@@ -1,0 +1,143 @@
+name: Sincronizar com o upstream
+
+# Todo dia: atualiza os espelhos e, se o upstream lançou uma versão nova, junta-a ao
+# nosso código, valida e abre um PR. Conflito ou falha viram issue. Nada é publicado
+# nos servidores por este fluxo.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: "Só compilar e testar o branch atual, sem PR"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://github.com/litespeedtech/openlitespeed.git
+  VERIFY_ONLY: ${{ inputs.verify_only }}
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Atualizar espelhos e detectar versão nova
+        id: detect
+        run: |
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch --tags upstream \
+            '+refs/heads/master:refs/remotes/upstream/master' \
+            '+refs/heads/v1_9:refs/remotes/upstream/v1_9'
+          git push origin \
+            refs/remotes/upstream/master:refs/heads/master \
+            refs/remotes/upstream/v1_9:refs/heads/v1_9
+
+          # Nossas tags têm sufixo (-htaccess.N) e ficam de fora.
+          tag=$(git tag -l 'v[0-9]*' --sort=-v:refname \
+                | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          mode=none
+          if [ "$VERIFY_ONLY" = "true" ]; then
+            mode=verify
+          elif ! git merge-base --is-ancestor "$tag" HEAD \
+               && ! git ls-remote --exit-code origin "refs/heads/sync/$tag" >/dev/null; then
+            mode=sync
+          fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "Versão mais recente: $tag. Modo: $mode."
+
+      - name: Juntar a versão nova
+        id: merge
+        if: steps.detect.outputs.mode == 'sync'
+        env:
+          TAG: ${{ steps.detect.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "sync/$TAG"
+          if git merge --no-edit "$TAG"; then
+            echo "conflict=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "conflict=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "O merge de \`$TAG\` teve conflito nestes arquivos:"
+            echo
+            git diff --name-only --diff-filter=U | sed 's/^/- `/; s/$/`/'
+            echo
+            echo "Faça o merge manualmente em um branch \`sync/$TAG\`."
+          } > conflict.md
+          git merge --abort
+          gh issue create --title "Upstream $TAG: conflito de merge" --body-file conflict.md
+
+      - name: Compilar e rodar os testes do upstream
+        id: tests
+        if: steps.detect.outputs.mode != 'none' && steps.merge.outputs.conflict != 'true'
+        run: |
+          docker build -f htaccess-compat/docker/ols.Dockerfile --target test -t ols-htaccess:test .
+          docker run --rm --cap-add SYS_PTRACE ols-htaccess:test
+          docker build -f htaccess-compat/docker/ols.Dockerfile --target runtime -t ols-htaccess:runtime .
+
+      - name: Comparar com o Apache
+        id: compare
+        if: steps.tests.outcome == 'success'
+        working-directory: htaccess-compat/compare
+        run: |
+          mkdir -p report
+          docker compose run --rm runner
+          docker compose down -v
+
+          passed() { grep -oE '\*\*[0-9]+ de [0-9]+\*\*' "$1" | grep -oE '[0-9]+' | head -n 1; }
+          before=$(passed BASELINE.md)
+          after=$(passed report/report.md)
+          echo "summary=$after requisições idênticas ao Apache (base: $before)" >> "$GITHUB_OUTPUT"
+          echo "$after requisições idênticas ao Apache (base: $before)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$after" -lt "$before" ]; then
+            echo "A compatibilidade piorou: de $before para $after." >&2
+            exit 1
+          fi
+
+      - name: Abrir PR
+        if: steps.detect.outputs.mode == 'sync' && steps.compare.outcome == 'success'
+        env:
+          TAG: ${{ steps.detect.outputs.tag }}
+          SUMMARY: ${{ steps.compare.outputs.summary }}
+        run: |
+          git push origin "sync/$TAG"
+          {
+            echo "Merge automático de \`$TAG\` do upstream."
+            echo
+            echo "- Testes do upstream: passaram"
+            echo "- Comparação: $SUMMARY"
+            echo
+            echo "Se a versão trouxer correção de segurança, priorize este PR."
+          } > pr.md
+          gh pr create --base "${{ github.event.repository.default_branch }}" --head "sync/$TAG" \
+            --title "Upstream $TAG" --body-file pr.md
+
+      - name: Registrar falha
+        if: failure() && steps.detect.outputs.mode == 'sync'
+        env:
+          TAG: ${{ steps.detect.outputs.tag }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create --title "Upstream $TAG: validação falhou" \
+            --body "A sincronização falhou. Log: $RUN_URL"
