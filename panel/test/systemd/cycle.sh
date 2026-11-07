@@ -59,10 +59,17 @@ systemctl is-enabled olsbridge-sync.timer >/dev/null && echo "[ok] timer ativo" 
 
 systemctl restart apache2 && sleep 1
 check "restart pelo nome do Apache" 200 beta.test /who.txt
+# O OLS atende todos os serviços disfarçados: parar um deles não derruba os sites.
+# Quem para o OLS é o olsbridge.service.
 systemctl stop apache2 && sleep 1
+curl -s -o /dev/null "http://$IP:8080/" && echo "[ok] stop do apache2 não derruba os sites" \
+    || { echo "[FALHOU] stop do apache2 derrubou os sites"; status=1; }
+systemctl start apache2
+systemctl stop olsbridge && sleep 1
 curl -s -o /dev/null "http://$IP:8080/" && { echo "[FALHOU] ainda responde após stop"; status=1; } \
-    || echo "[ok] stop para o OLS"
-systemctl start apache2 && sleep 1
+    || echo "[ok] stop do olsbridge para o OLS"
+systemctl start olsbridge && sleep 2
+check "OLS de volta" 200 beta.test /who.txt
 
 /usr/local/lsws/bin/olsbridge uninstall
 sleep 1

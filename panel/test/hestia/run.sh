@@ -11,11 +11,13 @@ IP=$(hostname -i | awk '{print $1}')
 curl -s -o /dev/null -A teste -e http://ref.test/ -H "Host: beta.test" "http://$IP:8080/who.txt?log=1"
 curl -s -o /dev/null -A teste -e http://ref.test/ -H "Host: beta.test" "http://$IP:18080/who.txt?log=1"
 sleep 3
-for f in beta.test.log beta.test.bytes; do
-    echo "$f"
-    echo "  apache: $(tail -n 1 /var/log/apache2/domains/$f)"
-    echo "  ols:    $(tail -n 1 /usr/local/lsws/logs/offset/$f)"
-done
+# Cada processo do OLS descarrega o seu buffer: a ordem das linhas pode mudar.
+echo "beta.test.log"
+echo "  apache: $(grep 'log=1' /var/log/apache2/domains/beta.test.log)"
+echo "  ols:    $(grep 'log=1' /usr/local/lsws/logs/offset/beta.test.log)"
+echo "beta.test.bytes (uma linha por requisição)"
+echo "  apache: $(wc -l < /var/log/apache2/domains/beta.test.bytes) linhas"
+echo "  ols:    $(wc -l < /usr/local/lsws/logs/offset/beta.test.bytes) linhas"
 echo "--- erros do OLS"
 grep -E '\[(ERROR|WARN)' /usr/local/lsws/logs/error.log | tail -n 15
 exit $status

@@ -104,6 +104,48 @@ for user, domain, force in domains:
 EOF
 
 rm -f /etc/php/8.3/fpm/pool.d/www.conf
+
+# PHP do sistema (phpMyAdmin e webmail), no pool www como o HestiaCP instala.
+id hestiamail >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin hestiamail
+cat > /etc/php/8.3/fpm/pool.d/www.conf <<'EOF'
+[www]
+listen = /run/php/www.sock
+listen.owner = hestiamail
+listen.group = www-data
+listen.mode = 0660
+user = hestiamail
+group = hestiamail
+pm = ondemand
+pm.max_children = 4
+EOF
+cp $F/hestia-event.conf $F/phpmyadmin.inc /etc/apache2/conf.d/
+who='<?php echo basename(__FILE__), " ", posix_getpwuid(posix_geteuid())["name"], "\n";'
+for d in libraries setup sql vendor templates locale js; do
+    mkdir -p /usr/share/phpmyadmin/$d
+    echo "$who" > /usr/share/phpmyadmin/$d/x.php
+    echo "estático $d" > /usr/share/phpmyadmin/$d/x.txt
+done
+echo "$who" > /usr/share/phpmyadmin/index.php
+echo "leia-me" > /usr/share/phpmyadmin/README
+
+# Webmail do primeiro domínio, com o template de e-mail do HestiaCP.
+mkdir -p /var/lib/roundcube/public_html /var/lib/roundcube/temp /var/lib/roundcube/config
+echo "$who" > /var/lib/roundcube/public_html/index.php
+echo "roundcube" > /var/lib/roundcube/public_html/robots.txt
+# Roundcube 1.6 serve o favicon por static.php, com PATH_INFO vindo de um rewrite.
+echo '<?php echo "static ", $_SERVER["SCRIPT_NAME"], " ", $_SERVER["PATH_INFO"] ?? "-", "\n";' \
+    > /var/lib/roundcube/public_html/static.php
+printf '<IfModule mod_rewrite.c>\nRewriteEngine On\nRewriteRule ^favicon\\.ico$ static.php/skins/elastic/images/favicon.ico\n</IfModule>\n' \
+    > /var/lib/roundcube/public_html/.htaccess
+a2enmod -q rewrite >/dev/null
+echo "segredo" > /var/lib/roundcube/temp/x.txt
+mkdir -p /home/alice/conf/mail/alpha.test
+sed -e "s/%ip%/$IP/g" -e "s/%web_port%/8080/g" -e "s/%domain_idn%/webmail.alpha.test/g" \
+    -e "s/%alias_idn%/mail.alpha.test/g" -e "s|%home%|/home|g" -e "s/%user%/alice/g" \
+    -e "s/%group%/alice/g" -e "s/%root_domain%/alpha.test/g" -e "s/%web_system%/apache2/g" \
+    $F/mail.tpl > /home/alice/conf/mail/alpha.test/apache2.conf
+ln -sf /home/alice/conf/mail/alpha.test/apache2.conf \
+    /etc/apache2/conf.d/domains/webmail.alpha.test.conf
 apache2ctl -t
 if [ -d /run/systemd/system ]; then
     # Com systemd, quem instala a ponte é o próprio teste.

@@ -36,6 +36,22 @@ def fetch(port, scheme, host, method, path, headers, body):
     return resp.status, {k.lower(): v for k, v in resp.getheaders()}, data
 
 
+# Diferenças aceitas, com o motivo.
+KNOWN = {
+    # Sem o arquivo, o mod_proxy_fcgi pergunta ao PHP-FPM, que responde "File not
+    # found."; o OLS confere antes e usa a página 404 do domínio. Mesmo status.
+    "GET http://beta.test/index.php": "PHP inexistente: OLS usa a página 404 do domínio",
+}
+
+# Limites do modo PHP-FPM, que este teste usa porque o Ubuntu 24.04 não tem
+# php-litespeed. Depois de um rewrite, o OLS manda REDIRECT_URL, e o PHP-FPM procura o
+# script por ele; o Apache escapa disso porque o SCRIPT_FILENAME dele começa com
+# proxy:fcgi://. Com o lsphp, o modo padrão da ponte, isto funciona (teste replace).
+FPM_LIMITS = {
+    "GET http://webmail.alpha.test/favicon.ico": "rewrite para PHP com PATH_INFO no PHP-FPM",
+}
+
+
 def summary(status, headers, body):
     out = {"status": status}
     if "location" in headers:
@@ -43,6 +59,9 @@ def summary(status, headers, body):
     out["type"] = headers.get("content-type", "").split(";")[0]
     if out["type"] == "application/json":
         out["body"] = json.loads(body)
+    elif status >= 400 and ('"-//IETF//DTD HTML 2.0//EN"' in body or
+                            "Proudly powered by LiteSpeed" in body):
+        out["body"] = "<página de erro padrão do servidor>"  # cada um tem a sua
     elif status < 300 or status >= 400:
         out["body"] = body.strip() if len(body) < 300 else "<%d bytes>" % len(body)
     return out
@@ -73,6 +92,19 @@ def cases():
             yield scheme, d, "GET", "/nada.html", {}, None
             yield scheme, d, "GET", "/vstats/", {}, None
             yield scheme, d, "GET", "/wp/.htaccess", {}, None
+    # phpMyAdmin incluído em cada vhost: PHP no pool www e pastas negadas.
+    for scheme, d in (("http", "beta.test"), ("https", "gamma.test")):
+        for path in ("/phpmyadmin/", "/phpmyadmin/index.php", "/phpmyadmin/README",
+                     "/phpmyadmin/js/x.php", "/phpmyadmin/js/x.txt",
+                     "/phpmyadmin/libraries/x.php", "/phpmyadmin/vendor/x.txt",
+                     "/phpmyadmin/setup/", "/phpmyadminx/"):
+            yield scheme, d, "GET", path, {}, None
+    # Webmail: raiz por Alias /, PHP do sistema e o domínio incluído duas vezes.
+    for path in ("/", "/index.php", "/robots.txt", "/error/404.html", "/nada", "/temp/x.txt",
+                 "/favicon.ico", "/static.php/skins/x.png"):
+        yield "http", "webmail.alpha.test", "GET", path, {}, None
+    yield "http", "mail.alpha.test", "GET", "/", {}, None
+    yield "http", "beta.test", "GET", "/index.php", {}, None
 
 
 def main():
@@ -90,6 +122,12 @@ def main():
         if results[0] == results[1]:
             same += 1
             print("[igual] %s -> %s" % (label, results[0].get("status")))
+        elif label in FPM_LIMITS:
+            same += 1
+            print("[limite] %s (%s)" % (label, FPM_LIMITS[label]))
+        elif label in KNOWN and results[0].get("status") == results[1].get("status"):
+            same += 1
+            print("[aceito] %s -> %s (%s)" % (label, results[0].get("status"), KNOWN[label]))
         else:
             print("[DIFERE] %s" % label)
             print("   apache: %s" % json.dumps(results[0], ensure_ascii=False, sort_keys=True))
