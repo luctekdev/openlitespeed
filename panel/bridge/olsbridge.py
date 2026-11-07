@@ -1936,15 +1936,42 @@ def cmd_stop(_settings):
     return 0
 
 
+def bridge_lock():
+    """Uma geração e um restart por vez: o painel reinicia apache2, nginx e phpX.Y-fpm
+    juntos, e o timer do sync roda a cada 30 s. Fechar o arquivo devolve a trava."""
+    import fcntl
+    handle = open(os.path.join(LSWS, "conf", ".olsbridge.lock"), "a")
+    fcntl.flock(handle, fcntl.LOCK_EX)
+    return handle
+
+
+def graceful_restart(pid):
+    """Restart gracioso: o OLS sobe um processo principal novo, que grava o PID, e o
+    antigo sai depois de terminar as conexões. Espera o novo assumir: um segundo sinal
+    antes disso faz o systemd ver o processo principal sair sem PID novo no arquivo e
+    reiniciar o serviço inteiro, com os sites fora por alguns segundos."""
+    try:
+        os.kill(pid, signal.SIGUSR1)
+    except OSError:
+        return False
+    for _ in range(100):
+        time.sleep(0.1)
+        new = ols_pid()
+        if new and new != pid:
+            return True
+    return False
+
+
 def cmd_reload(settings, only_if_changed=False):
-    changed, _warnings = generate(settings, quiet=only_if_changed)
-    pid = ols_pid()
-    if not pid:
-        return cmd_start(settings)
-    if changed or not only_if_changed:
-        os.kill(pid, signal.SIGUSR1)  # restart gracioso: novas conexões já usam a config nova
-    if changed:
-        restart_lsphp()  # um pool pode ter mudado de usuário, limites ou valores
+    with bridge_lock():
+        changed, _warnings = generate(settings, quiet=only_if_changed)
+        pid = ols_pid()
+        if not pid:
+            return cmd_start(settings)
+        if changed or not only_if_changed:
+            graceful_restart(pid)  # novas conexões já usam a config nova
+        if changed:
+            restart_lsphp()  # um pool pode ter mudado de usuário, limites ou valores
     return 0
 
 
@@ -3444,19 +3471,24 @@ def restart_lsphp(versions=None):
 
 
 def cmd_unit_reload(settings, unit):
-    """O que apache2, nginx e phpX.Y-fpm fazem no start, restart e reload."""
-    changed, _warnings = generate(settings, quiet=True)
-    pid = ols_pid()
-    if not pid:
-        systemctl("start", "--no-block", "olsbridge.service")
-        return 0
-    os.kill(pid, signal.SIGUSR1)
-    match = re.match(r"^php(\d+\.\d+)-fpm$", unit)
-    if match:
-        # O painel reinicia o phpX.Y-fpm depois de mudar o php.ini ou um pool.
-        restart_lsphp([match.group(1)])
-    elif changed:
-        restart_lsphp()
+    """O que apache2, nginx e phpX.Y-fpm fazem no start, restart e reload.
+
+    O OLS só reinicia se a configuração gerada mudou: na instalação e no boot as
+    unidades sobem juntas, logo depois do OLS, que já está com a configuração atual."""
+    with bridge_lock():
+        changed, _warnings = generate(settings, quiet=True)
+        pid = ols_pid()
+        if not pid:
+            systemctl("start", "--no-block", "olsbridge.service")
+            return 0
+        if changed:
+            graceful_restart(pid)
+        match = re.match(r"^php(\d+\.\d+)-fpm$", unit)
+        if match:
+            # O painel reinicia o phpX.Y-fpm depois de mudar o php.ini ou um pool.
+            restart_lsphp([match.group(1)])
+        elif changed:
+            restart_lsphp()
     return 0
 
 
