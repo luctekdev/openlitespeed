@@ -79,3 +79,24 @@ No bloco `rewrite` da vhost:
 | `htaccessCheckInterval` | segundos, `0` a `3600` | `1` | Intervalo mínimo entre verificações de cada diretório |
 | `htaccessAllowOverride` | `All`, `None` ou lista | `All` | Como o `AllowOverride` do Apache |
 | `htaccessAllowProxy` | `0`, `1` | `0` | Permite `RewriteRule [P]` no `.htaccess` |
+
+Na raiz da vhost, para limitar logins no WordPress (`wp-login.php` e `xmlrpc.php`):
+
+| Chave | Padrão | Efeito |
+|---|---|---|
+| `wpProtectLimit` | `0` (desligado) | Tentativas `POST` permitidas por cliente na janela |
+| `wpProtectWindow` | `300` | Duração da janela, em segundos |
+| `wpProtectBlock` | `900` | Tempo de bloqueio, em segundos. Responde 429 com `Retry-After` |
+
+## Migrar vhosts do Apache
+
+```bash
+python3 htaccess-compat/tools/apache2ols.py /etc/apache2/apache2.conf --out /tmp/ols
+```
+
+Gera `httpd_vhosts.conf`, os `vhconf.conf` de cada vhost e `avisos.txt`, com o que não foi convertido. Nada é aplicado
+ao servidor. Para testar o conversor num OLS real:
+
+```bash
+sh htaccess-compat/tools/check_apache2ols.sh
+```

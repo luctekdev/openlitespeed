@@ -1,6 +1,6 @@
 # Compatibilidade nativa com `.htaccess` no OpenLiteSpeed
 
-Status: Fases 0 a 3 implementadas; ver a seção 11. Base: `master` em `031b2c8` (2026-11-01).
+Status: Fases 0 a 3 implementadas, Fases 4 e 5 parciais; ver a seção 11. Base: `master` em `031b2c8` (2026-11-01).
 
 ## 1. Objetivo
 
@@ -266,7 +266,7 @@ usa a mesma árvore. A correção também interessa ao upstream.
 | Arquivos estáticos | 98 de 99 requisições iguais ao Apache (OLS original: 31 de 62, num corpus menor) |
 | PHP | 21 de 21 iguais ao Apache com mod_php |
 | Recarregamento | Todos os cenários, sob carga e sem erros |
-| Política | 26 de 26 |
+| Política | 33 de 33 |
 | Memória | 100 mil URLs inexistentes: 0,5 MB, contra 68 MB no OLS original |
 | ASan | Nenhum erro, incluindo a liberação de contextos antigos sob carga |
 
@@ -301,8 +301,23 @@ cliente `ab` pode ser o limite nesse patamar, então isso não prova ausência d
 | Contexto configurado abaixo de um `.htaccess` | Não herda esse `.htaccess` |
 | `lsphp` no contêiner de teste | Roda à parte, porque o `cgid` não conseguiu iniciá-lo no Docker. Não foi investigado |
 
+### Estado das Fases 4 e 5
+
+| Item | Estado |
+|---|---|
+| Conversor de vhosts do Apache (`htaccess-compat/tools/apache2ols.py`) | Pronto para domínios, alias, SSL, rewrite da vhost, `DirectoryIndex`, `ErrorDocument` e `AllowOverride`. O resto vai para `avisos.txt`. Testado num OLS real com um exemplo; SSL não foi testado com certificado real |
+| Proteção contra força bruta no WordPress | Pronta: `wpProtectLimit`, `wpProtectWindow`, `wpProtectBlock`. Bloqueia com 429; não há atraso progressivo nem lista de IPs confiáveis |
+| Leitura direta do `httpd.conf` em execução | Não feita. O conversor gera a configuração uma vez, sem acompanhar mudanças |
+| Plugins para cPanel e Plesk | Não feitos |
+| ESI | Não feito. Exige mudanças no módulo de cache |
+| Handshake SSL assíncrono | Não feito |
+| Cache para Magento, PrestaShop e Shopware | Não feito |
+| Atualização do servidor sem downtime | Não feita |
+
 ### Pendências
 
 - Corpus maior, com arquivos `.htaccess` reais completos de plugins e aplicações.
-- Teste em servidor real com tráfego real antes de usar em produção.
-- Fases 4 e 5.
+- Teste em servidor real, com tráfego real, antes de usar em produção.
+- A sincronização com o upstream só foi exercitada sem versão nova: o caminho de merge, PR e conflito ainda não rodou.
+- Enviar à LiteSpeed as correções que valem para todos: vazamento de contextos, `env=` ignorado em `Header` e
+  regras de `Files` puladas pelo cache de URL.
