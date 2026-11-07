@@ -323,3 +323,9 @@ cliente `ab` pode ser o limite nesse patamar, então isso não prova ausência d
   [PR 548](https://github.com/litespeedtech/openlitespeed/pull/548), e o vazamento de contextos foi relatado em privado.
   Regras de `Files` puladas pelo cache de URL não foram enviadas: sem o suporte a `.htaccess` deste fork, o OLS só tem
   regras de `Files` que negam tudo ou forçam o tipo, então um arquivo bloqueado nunca entra no cache.
+- Também enviados em 2026-11-07, com reprodução no `master` 031b2c89 e `ctest` 2 de 2:
+  [PR 549](https://github.com/litespeedtech/openlitespeed/pull/549) (`SCRIPT_NAME` com o PATH_INFO depois de um
+  rewrite), [PR 550](https://github.com/litespeedtech/openlitespeed/pull/550) (regras da vhost nas URLs do ACME) e
+  [PR 551](https://github.com/litespeedtech/openlitespeed/pull/551) (`persistConn 0` ignorado no LSAPI). Não foi
+  enviado: com PHP-FPM, o `REDIRECT_URL` que o OLS manda depois de um rewrite faz o PHP-FPM procurar o script errado
+  (a ponte usa lsphp, que não tem esse problema); está descrito na PR 549.
