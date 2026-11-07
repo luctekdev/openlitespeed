@@ -95,25 +95,18 @@ jobs:
           docker build -f htaccess-compat/docker/ols.Dockerfile --target test -t ols-htaccess:test .
           docker run --rm --cap-add SYS_PTRACE ols-htaccess:test
           docker build -f htaccess-compat/docker/ols.Dockerfile --target runtime -t ols-htaccess:runtime .
+          docker build -f htaccess-compat/docker/ols.Dockerfile --target php -t ols-htaccess:php .
 
       - name: Comparar com o Apache
         id: compare
         if: steps.tests.outcome == 'success'
         working-directory: htaccess-compat/compare
+        shell: bash
         run: |
-          mkdir -p report
-          docker compose run --rm runner
-          docker compose down -v
-
-          passed() { grep -oE '\*\*[0-9]+ de [0-9]+\*\*' "$1" | grep -oE '[0-9]+' | head -n 1; }
-          before=$(passed BASELINE.md)
-          after=$(passed report/report.md)
-          echo "summary=$after requisições idênticas ao Apache (base: $before)" >> "$GITHUB_OUTPUT"
-          echo "$after requisições idênticas ao Apache (base: $before)" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$after" -lt "$before" ]; then
-            echo "A compatibilidade piorou: de $before para $after." >&2
-            exit 1
-          fi
+          set -o pipefail
+          sh all.sh | tee result.txt
+          cat result.txt >> "$GITHUB_STEP_SUMMARY"
+          echo "summary=$(grep -E '^report' result.txt | tr '\n' ';')" >> "$GITHUB_OUTPUT"
 
       - name: Abrir PR
         if: steps.detect.outputs.mode == 'sync' && steps.compare.outcome == 'success'

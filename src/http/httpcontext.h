@@ -284,6 +284,8 @@ public:
     int matchFiles(const char *pFile, int len) const;
     const HttpContext *matchFilesContext(const char *pURI,
                                          int iURILen) const;
+    const HttpContext *nextFilesContext(const HttpContext *pPrev,
+                                        const char *pURI, int len) const;
     int shouldMatchFiles() const
     {   return (m_pInternal->m_pFilesMatchList != NULL);   }
 

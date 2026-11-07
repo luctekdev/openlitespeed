@@ -182,6 +182,8 @@ private:
     char                m_iGlobalMatchContext;
     int8_t              m_iEarlyHints;
     int8_t              m_iHtaMode;
+    int8_t              m_iHtaProxy;
+    int8_t              m_iHtaOverride;
     int16_t             m_iHtaCheckInterval;
     int16_t             m_iHtaGraveTicks;
 
@@ -297,6 +299,8 @@ public:
     int  isHtaLive() const
     {   return enableAutoLoadHt() && m_iHtaMode != HTA_OFF;   }
     int  getHtaMode() const             {   return m_iHtaMode;      }
+    int  getHtaOverride() const         {   return m_iHtaOverride;  }
+    int  isHtaProxyAllowed() const      {   return m_iHtaProxy;     }
 
     const HttpContext *matchLocation(const char *pURI, size_t iUriLen,
                                      int regex = 0) const;

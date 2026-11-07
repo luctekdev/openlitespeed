@@ -49,6 +49,20 @@ struct HtaDirective
 class Htaccess
 {
 public:
+    /** The groups of Apache's AllowOverride. */
+    enum
+    {
+        OVERRIDE_AUTH       = 1,
+        OVERRIDE_FILEINFO   = 2,
+        OVERRIDE_INDEXES    = 4,
+        OVERRIDE_LIMIT      = 8,
+        OVERRIDE_OPTIONS    = 16,
+        OVERRIDE_ALL        = 31
+    };
+
+    /** Parses a list such as "AuthConfig Limit". "None" gives 0. */
+    static int parseOverride(const char *pList);
+
     /** Fills stamp with the identity of the .htaccess in pDir, if there is one. */
     static void stat(const char *pDir, HtaStamp &stamp);
 
@@ -70,6 +84,9 @@ public:
     /** The rules are created by load() and owned by a context. */
     static void releaseRules(HtaRules *pRules);
     static void setParentRules(HtaRules *pRules, const HtaRules *pParent);
+
+private:
+    static int  checkRules(HttpSession *pSession, const HtaRules *pRules);
 };
 
 #endif

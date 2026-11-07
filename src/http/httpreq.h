@@ -47,6 +47,7 @@ enum
 
 
 #define MAX_REDIRECTS           10
+#define MAX_FM_EXTRA            7
 
 #define PROCESS_CONTEXT         (1<<0)
 #define CONTEXT_AUTH_CHECKED    (1<<1)
@@ -289,6 +290,8 @@ private:
     HttpRange          *m_pRange;
     HttpVHost          *m_pVHost;
     const char         *m_pForcedType;
+    const HttpContext  *m_pFMExtra[MAX_FM_EXTRA];
+    int                 m_iFMExtra;
     const HTAuth       *m_pHTAuth;
     const AuthRequired *m_pAuthRequired;
     int                 m_iHostOff;
@@ -782,6 +785,10 @@ public:
     }
     const HttpContext *getContext() const   {   return m_pContext;          }
     const HttpContext *getFMContext() const {   return m_pFMContext;        }
+    //Files blocks after the first one that also match the request
+    int getFMExtraCount() const             {   return m_iFMExtra;          }
+    const HttpContext *getFMExtra(int i) const {   return m_pFMExtra[i];   }
+    int isFMOverflow() const            {   return m_iFMExtra > MAX_FM_EXTRA;    }
     void setHtAuth(const HTAuth *pAuth, const AuthRequired *pRequired)
     {
         m_pHTAuth = pAuth;

@@ -304,6 +304,26 @@ int HttpContext::matchFiles(const char *pFile, int len) const
 }
 
 
+const HttpContext *HttpContext::nextFilesContext(const HttpContext *pPrev,
+        const char *pFile, int len) const
+{
+    if (!m_pInternal->m_pFilesMatchList)
+        return NULL;
+    ContextList::iterator iter;
+    int found = 0;
+    for (iter = m_pInternal->m_pFilesMatchList->begin();
+         iter != m_pInternal->m_pFilesMatchList->end();
+         ++iter)
+    {
+        if (found && (*iter)->matchFiles(pFile, len) == 1)
+            return *iter;
+        if (*iter == pPrev)
+            found = 1;
+    }
+    return NULL;
+}
+
+
 const HttpContext *HttpContext::matchFilesContext(const char *pFile,
         int len) const
 {

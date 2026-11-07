@@ -277,6 +277,15 @@ CASES = [
                    "<Files xmlrpc.php>\n<RequireAll>\nRequire all denied\n</RequireAll>\n</Files>\n"),
          files={"wp-config.php": "secret\n", "xmlrpc.php": "x\n"},
          requests=[get("wp-config.php"), get("xmlrpc.php"), get("page.txt")]),
+    dict(name="two-files-blocks", group="segurança",
+         htaccess=("<FilesMatch \"\\.txt$\">\nHeader set X-Txt \"1\"\n</FilesMatch>\n"
+                   "<Files \"secret.txt\">\nRequire all denied\n</Files>\n"),
+         files={"secret.txt": "secret\n"},
+         requests=[get("secret.txt"), get("page.txt")]),
+    dict(name="two-files-headers", group="core",
+         htaccess=("<FilesMatch \"\\.txt$\">\nHeader set X-A \"1\"\n</FilesMatch>\n"
+                   "<Files \"page.txt\">\nHeader set X-B \"2\"\n</Files>\n"),
+         requests=[get("page.txt")]),
     dict(name="protect-htaccess", group="segurança",
          htaccess="# vazio\n",
          requests=[get(".htaccess")], status_only=True),

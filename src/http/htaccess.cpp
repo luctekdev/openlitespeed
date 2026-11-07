@@ -856,6 +856,9 @@ static bool addAllowDeny(const HtaBuild &b, HtaRules *pRules,
             warn(b, dir, "invalid address");
             return false;
         }
+        //No blocking reverse lookup on the request path: the name never matches.
+        if (addr.m_type == HtaAddr::HOST)
+            warn(b, dir, "host names are not resolved, use addresses");
         list.push_back(addr);
     }
     return true;
@@ -990,6 +993,81 @@ static bool parseRequireBlock(const HtaBuild &b, const HtaDirective &block,
         if (!addRequire(b, block.m_children[i], pParent, methods))
             return false;
     return true;
+}
+
+
+/** Which AllowOverride group each directive needs. Unlisted ones are FileInfo. */
+static int overrideGroup(const char *pName)
+{
+    static const struct { const char *m_pName; int m_iGroup; } s_groups[] =
+    {
+        {"AuthType", Htaccess::OVERRIDE_AUTH},
+        {"AuthName", Htaccess::OVERRIDE_AUTH},
+        {"AuthUserFile", Htaccess::OVERRIDE_AUTH},
+        {"AuthGroupFile", Htaccess::OVERRIDE_AUTH},
+        {"Require", Htaccess::OVERRIDE_AUTH},
+        {"RequireAny", Htaccess::OVERRIDE_AUTH},
+        {"RequireAll", Htaccess::OVERRIDE_AUTH},
+        {"RequireNone", Htaccess::OVERRIDE_AUTH},
+        {"Satisfy", Htaccess::OVERRIDE_AUTH},
+        {"Order", Htaccess::OVERRIDE_LIMIT},
+        {"Allow", Htaccess::OVERRIDE_LIMIT},
+        {"Deny", Htaccess::OVERRIDE_LIMIT},
+        {"DirectoryIndex", Htaccess::OVERRIDE_INDEXES},
+        {"ExpiresActive", Htaccess::OVERRIDE_INDEXES},
+        {"ExpiresByType", Htaccess::OVERRIDE_INDEXES},
+        {"ExpiresDefault", Htaccess::OVERRIDE_INDEXES},
+        {"Options", Htaccess::OVERRIDE_OPTIONS},
+        {"php_value", Htaccess::OVERRIDE_OPTIONS},
+        {"php_flag", Htaccess::OVERRIDE_OPTIONS},
+    };
+    for (size_t i = 0; i < sizeof(s_groups) / sizeof(s_groups[0]); ++i)
+        if (strcasecmp(pName, s_groups[i].m_pName) == 0)
+            return s_groups[i].m_iGroup;
+    return Htaccess::OVERRIDE_FILEINFO;
+}
+
+
+int Htaccess::parseOverride(const char *pList)
+{
+    static const struct { const char *m_pName; int m_iGroup; } s_names[] =
+    {
+        {"All", OVERRIDE_ALL}, {"AuthConfig", OVERRIDE_AUTH},
+        {"FileInfo", OVERRIDE_FILEINFO}, {"Indexes", OVERRIDE_INDEXES},
+        {"Limit", OVERRIDE_LIMIT}, {"Options", OVERRIDE_OPTIONS},
+    };
+    std::vector<std::string> args;
+    splitArgs(pList, pList + strlen(pList), args);
+    int mask = 0;
+    for (size_t i = 0; i < args.size(); ++i)
+        for (size_t n = 0; n < sizeof(s_names) / sizeof(s_names[0]); ++n)
+            if (strcasecmp(args[i].c_str(), s_names[n].m_pName) == 0)
+                mask |= s_names[n].m_iGroup;
+    return mask;
+}
+
+
+/** [P] sends the request to any host, which a site owner must not decide. */
+static bool usesProxyFlag(const HtaDirective &dir)
+{
+    if (strcasecmp(dir.m_sName.c_str(), "RewriteRule") != 0 || dir.m_args.size() < 3)
+        return false;
+    const std::string &flags = dir.m_args.back();
+    if (flags.size() < 2 || flags[0] != '[')
+        return false;
+    size_t pos = 1;
+    while (pos < flags.size())
+    {
+        size_t end = flags.find_first_of(",]", pos);
+        if (end == std::string::npos)
+            end = flags.size();
+        std::string flag = flags.substr(pos, end - pos);
+        if (strcasecmp(flag.c_str(), "P") == 0
+            || strcasecmp(flag.c_str(), "proxy") == 0)
+            return true;
+        pos = end + 1;
+    }
+    return false;
 }
 
 
@@ -1421,6 +1499,46 @@ static bool applyAccess(HtaBuild &b, HttpContext *pContext,
 }
 
 
+static bool isAccessDirective(const char *pName)
+{
+    static const char *const s_access[] =
+    {
+        "Order", "Allow", "Deny", "Satisfy", "AuthType", "AuthName", "AuthUserFile",
+        "AuthGroupFile", NULL
+    };
+    if (strncasecmp(pName, "Require", 7) == 0)
+        return true;
+    for (int i = 0; s_access[i]; ++i)
+        if (strcasecmp(pName, s_access[i]) == 0)
+            return true;
+    return false;
+}
+
+
+static bool hasAccessDirective(const HtaDirective &dir)
+{
+    if (isAccessDirective(dir.m_sName.c_str()))
+        return true;
+    for (size_t i = 0; i < dir.m_children.size(); ++i)
+        if (hasAccessDirective(dir.m_children[i]))
+            return true;
+    return false;
+}
+
+
+/** Dropping an access rule would make public what it protects. */
+static void rejectBlock(const HtaBuild &b, HttpContext *pContext,
+                        const HtaDirective &dir, const char *pMsg)
+{
+    warn(b, dir, pMsg);
+    if (hasAccessDirective(dir))
+    {
+        warn(b, dir, "it holds access rules, denying access");
+        ownRules(pContext)->m_bDenyAll = true;
+    }
+}
+
+
 /** Directives that can run conditionally at request time. */
 static bool allowedInIf(const char *pName)
 {
@@ -1489,7 +1607,7 @@ static void applyIf(HtaBuild &b, HttpContext *pContext, const HtaDirective &bloc
             || strcasecmp(pChild, "Else") == 0)
             applyOne(b, pContext, dir, HTA_ALL_METHODS);
         else
-            warn(b, dir, "not supported inside <If>, ignored");
+            rejectBlock(b, pContext, dir, "not supported inside <If>, ignored");
     }
     b.m_sCond = saved;
     b.m_chain.swap(savedChain);
@@ -1504,6 +1622,11 @@ static void applyOne(HtaBuild &b, HttpContext *pContext, const HtaDirective &dir
     const char *pName = dir.m_sName.c_str();
     const std::vector<std::string> &args = dir.m_args;
     const char *pArg = args.empty() ? "" : args[0].c_str();
+
+    //Conditions and containers are no settings: AllowOverride looks inside them.
+    bool isContainer = dir.m_bBlock && strncasecmp(pName, "Require", 7) != 0;
+    if (!isContainer && !(overrideGroup(pName) & b.m_pVHost->getHtaOverride()))
+        return;
 
     if (dir.m_bBlock)
     {
@@ -1547,7 +1670,7 @@ static void applyOne(HtaBuild &b, HttpContext *pContext, const HtaDirective &dir
         }
         else
         {
-            warn(b, dir, "unsupported block ignored");
+            rejectBlock(b, pContext, dir, "unsupported block ignored");
             if (b.m_pVHost->getHtaMode() == HttpVHost::HTA_STRICT)
                 ownRules(pContext)->m_bBroken = true;
         }
@@ -1566,12 +1689,32 @@ static void applyOne(HtaBuild &b, HttpContext *pContext, const HtaDirective &dir
     else if (strncasecmp(pName, "Rewrite", 7) == 0
              && strcasecmp(pName, "RewriteOptions") != 0)
     {
-        b.m_sRewrite += dir.m_sLine;
-        b.m_sRewrite += '\n';
+        if (usesProxyFlag(dir) && !b.m_pVHost->isHtaProxyAllowed())
+            warn(b, dir, "proxying is not allowed in .htaccess, rule skipped");
+        else
+        {
+            b.m_sRewrite += dir.m_sLine;
+            b.m_sRewrite += '\n';
+        }
     }
     else if (strcasecmp(pName, "Header") == 0
              || strcasecmp(pName, "RequestHeader") == 0)
     {
+        size_t action = (!args.empty()
+                         && (strcasecmp(pArg, "always") == 0
+                             || strcasecmp(pArg, "onsuccess") == 0)) ? 1 : 0;
+        const char *pAction = action < args.size() ? args[action].c_str() : "";
+        static const char *const s_actions[] =
+        {   "add", "append", "merge", "set", "unset", NULL  };
+        int known = 0;
+        for (int i = 0; s_actions[i]; ++i)
+            known |= (strcasecmp(pAction, s_actions[i]) == 0);
+        if (!known)
+        {
+            //The parser would take the action for a header name.
+            warn(b, dir, "unsupported header action ignored");
+            return;
+        }
         std::string line = dir.m_sLine;
         if (!b.m_sCond.empty())
             line += " env=" + b.m_sCond;
@@ -1797,6 +1940,7 @@ static int readFile(const char *pPath, AutoStr2 &content)
     int fd = open(pPath, O_RDONLY | O_NONBLOCK);
     if (fd == -1)
         return LS_FAIL;
+    errno = 0;      //the caller only looks at it for a failed open()
     struct stat st;
     int ret = LS_FAIL;
     if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size <= HTA_MAX_SIZE
@@ -1843,6 +1987,9 @@ int Htaccess::load(HttpVHost *pVHost, HttpContext *pContext)
         return LS_FAIL;
     }
 
+    if (!pVHost->getHtaOverride())
+        return 0;
+
     std::vector<HtaDirective> directives;
     int errLine = parse(content.c_str(), directives);
     if (errLine)
@@ -1880,15 +2027,6 @@ int Htaccess::load(HttpVHost *pVHost, HttpContext *pContext)
 // Request time
 // ---------------------------------------------------------------------------
 
-static const HtaRules *activeRules(HttpSession *pSession)
-{
-    HttpReq *pReq = pSession->getReq();
-    const HttpContext *pFiles = pReq->getFMContext();
-    if (pFiles && pFiles->getHtaRules())
-        return pFiles->getHtaRules();
-    const HttpContext *pContext = pReq->getContext();
-    return pContext ? pContext->getHtaRules() : NULL;
-}
 
 
 static bool hasEnv(HttpSession *pSession, const std::string &name);
@@ -2327,13 +2465,38 @@ static int evalRequire(HttpSession *pSession, const HtaRequire *pReq,
 }
 
 
+/**
+ * Apache merges the sections that match a file, later ones winning. Here all of
+ * them must agree, which can only be stricter.
+ */
 int Htaccess::checkAccess(HttpSession *pSession)
 {
-    const HtaRules *pRules = activeRules(pSession);
+    HttpReq *pReq = pSession->getReq();
     //The error page of a denied request lives under the same rules.
-    if (!pRules || pSession->getReq()->isErrorPage())
+    if (pReq->isErrorPage())
         return 0;
+    const HttpContext *pFiles = pReq->getFMContext();
+    if (!pFiles)
+    {
+        const HttpContext *pContext = pReq->getContext();
+        return (pContext && pContext->getHtaRules())
+               ? checkRules(pSession, pContext->getHtaRules()) : 0;
+    }
+    if (pReq->isFMOverflow())
+        return SC_403;
+    int ret = pFiles->getHtaRules() ? checkRules(pSession, pFiles->getHtaRules()) : 0;
+    for (int i = 0; !ret && i < pReq->getFMExtraCount(); ++i)
+    {
+        pFiles = pReq->getFMExtra(i);
+        if (pFiles->getHtaRules())
+            ret = checkRules(pSession, pFiles->getHtaRules());
+    }
+    return ret;
+}
 
+
+int Htaccess::checkRules(HttpSession *pSession, const HtaRules *pRules)
+{
     const HtaRules *pAuthRules = NULL;
     const HtaRequire *pRequire = NULL;
     int satisfy = SATISFY_UNSET;

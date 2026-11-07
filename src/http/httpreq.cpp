@@ -3078,8 +3078,23 @@ int HttpReq::filesMatch(const char *pEnd)
     {
         assert(!m_pFMContext);
         m_pFMContext = m_pContext->matchFilesContext(p, len);
+        m_iFMExtra = 0;
         if (m_pFMContext)
+        {
             m_iContextState &= ~CONTEXT_AUTH_CHECKED;
+            const HttpContext *pNext = m_pFMContext;
+            while ((pNext = m_pContext->nextFilesContext(pNext, p, len)) != NULL)
+            {
+                if (m_iFMExtra < MAX_FM_EXTRA)
+                    m_pFMExtra[m_iFMExtra] = pNext;
+                else
+                {
+                    m_iFMExtra = MAX_FM_EXTRA + 1;
+                    break;
+                }
+                ++m_iFMExtra;
+            }
+        }
         if ((m_pFMContext) && (m_pFMContext->getConfigBits()& BIT_FORCE_TYPE))
         {
             if (m_pFMContext->getForceType())
@@ -4800,6 +4815,14 @@ int HttpReq::applyHeaderOps(HttpSession * pSession,
         && (m_pFMContext->getConfigBits() & BIT_EXTRA_HEADER))
         ret = applyOps(pSession, pRespHeader, m_pFMContext->getHeaderOps(), 1,
                        linksOnly);
+    if (m_pFMContext)
+    {
+        for (int i = 0; !ret && i < m_iFMExtra && i < MAX_FM_EXTRA; ++i)
+            if (m_pFMExtra[i]->getHeaderOps()
+                && (m_pFMExtra[i]->getConfigBits() & BIT_EXTRA_HEADER))
+                ret = applyOps(pSession, pRespHeader, m_pFMExtra[i]->getHeaderOps(),
+                               1, linksOnly);
+    }
     return ret;
 }
 

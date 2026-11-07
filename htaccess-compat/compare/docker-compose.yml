@@ -15,6 +15,8 @@ services:
 
   ols:
     image: ${OLS_IMAGE:-ols-htaccess:runtime}
+    environment:
+      - LS_HTA_GRAVE_TICKS=${LS_HTA_GRAVE_TICKS:-60}
     volumes:
       - ./ols/httpd_config.conf:/usr/local/lsws/conf/httpd_config.conf:ro
       - ./ols/vhconf.conf:/usr/local/lsws/conf/vhosts/compat/vhconf.conf:ro
@@ -32,6 +34,22 @@ services:
       - ./:/compare:ro
       - ./report:/report
       - www:/www
+
+  # Benchmark: mesmas vhosts das políticas. O cliente é o ab da imagem do Apache.
+  # Garantias de segurança e modos de operação.
+  ols-policy:
+    image: ${OLS_IMAGE:-ols-htaccess:runtime}
+    profiles: ["policy"]
+    volumes:
+      - ./ols/httpd_config_policy.conf:/usr/local/lsws/conf/httpd_config.conf:ro
+      - ./ols/vhconf.conf:/usr/local/lsws/conf/vhosts/compat/vhconf.conf:ro
+      - ./ols/policy_strict.conf:/usr/local/lsws/conf/vhosts/strict/vhconf.conf:ro
+      - ./ols/policy_off.conf:/usr/local/lsws/conf/vhosts/off/vhconf.conf:ro
+      - ./ols/policy_none.conf:/usr/local/lsws/conf/vhosts/none/vhconf.conf:ro
+      - ./ols/policy_authonly.conf:/usr/local/lsws/conf/vhosts/authonly/vhconf.conf:ro
+      - ./ols/policy_proxy.conf:/usr/local/lsws/conf/vhosts/proxy/vhconf.conf:ro
+      - ./ols/policy_bench.conf:/usr/local/lsws/conf/vhosts/bench/vhconf.conf:ro
+      - www:/www:ro
 
   # Comparação com PHP. Gere antes a imagem --target php.
   apache-php:

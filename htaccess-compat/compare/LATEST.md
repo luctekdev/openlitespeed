@@ -1,11 +1,11 @@
 # Matriz de compatibilidade Apache x OLS
 
-Requisições idênticas: **93 de 94**.
+Requisições idênticas: **98 de 99**.
 
 | Grupo | Iguais | Total |
 |---|---|---|
 | aplicações reais | 14 | 14 |
-| core | 23 | 24 |
+| core | 24 | 25 |
 | mod_access_compat | 5 | 5 |
 | mod_alias | 8 | 8 |
 | mod_auth_basic | 6 | 6 |
@@ -14,11 +14,11 @@ Requisições idênticas: **93 de 94**.
 | mod_dir | 1 | 1 |
 | mod_env | 2 | 2 |
 | mod_expires | 2 | 2 |
-| mod_headers | 6 | 6 |
+| mod_headers | 8 | 8 |
 | mod_mime | 1 | 1 |
 | mod_rewrite | 10 | 10 |
 | mod_setenvif | 2 | 2 |
-| segurança | 5 | 5 |
+| segurança | 7 | 7 |
 
 ## Divergências
 

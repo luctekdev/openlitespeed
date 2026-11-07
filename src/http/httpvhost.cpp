@@ -264,6 +264,8 @@ HttpVHost::HttpVHost(const char *pHostName)
     , m_iGlobalMatchContext(1)
     , m_iEarlyHints(-1)
     , m_iHtaMode(HTA_COMPAT)
+    , m_iHtaProxy(0)
+    , m_iHtaOverride(Htaccess::OVERRIDE_ALL)
     , m_iHtaCheckInterval(1)
     , m_iHtaGraveTicks(0)
     , m_iFeatures(VH_ENABLE | VH_SERVER_ENABLE |
@@ -820,7 +822,14 @@ void HttpVHost::htaDropUrlCache()
  */
 void HttpVHost::htaRotateGrave()
 {
-    if (++m_iHtaGraveTicks < 60)
+    int ticks = 60;
+#ifdef RUN_TEST
+    //Lets the sanitizer builds exercise this without waiting an hour.
+    const char *pTicks = getenv("LS_HTA_GRAVE_TICKS");
+    if (pTicks)
+        ticks = atoi(pTicks);
+#endif
+    if (++m_iHtaGraveTicks < ticks)
         return;
     m_iHtaGraveTicks = 0;
     m_htaGraveOld.release_objects();
@@ -1407,6 +1416,11 @@ int HttpVHost::configRewrite(const XmlNode *pNode)
     }
     m_iHtaCheckInterval = ConfigCtx::getCurConfigCtx()->getLongValue(pNode,
                                 "htaccessCheckInterval", 0, 3600, 1);
+    m_iHtaProxy = ConfigCtx::getCurConfigCtx()->getLongValue(pNode,
+                                "htaccessAllowProxy", 0, 1, 0);
+    const char *pOverride = pNode->getChildValue("htaccessAllowOverride");
+    if (pOverride)
+        m_iHtaOverride = Htaccess::parseOverride(pOverride);
 
     configRewriteMap(pNode);
 

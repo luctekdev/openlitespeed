@@ -186,6 +186,8 @@ plainconfKeywords plainconf::sKeywords[] =
     {"hardlimit",                                NULL},
     {"hotlinkctrl",                              NULL},
     {"htaccess",                                 NULL},
+    {"htaccessallowoverride",                    NULL},
+    {"htaccessallowproxy",                       NULL},
     {"htaccesscheckinterval",                    NULL},
     {"htaccessmode",                             NULL},
     {"httpdworkers",                             NULL},

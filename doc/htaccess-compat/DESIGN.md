@@ -1,6 +1,6 @@
 # Compatibilidade nativa com `.htaccess` no OpenLiteSpeed
 
-Status: proposta. Base analisada: `master` em `031b2c8` (2026-11-01).
+Status: Fases 0 a 3 implementadas; ver a seção 11. Base: `master` em `031b2c8` (2026-11-01).
 
 ## 1. Objetivo
 
@@ -256,3 +256,53 @@ usa a mesma árvore. A correção também interessa ao upstream.
   com arquivos estáticos.
 - Links simbólicos: no Windows, o Git os grava como texto. O Dockerfile os restaura a partir do índice.
 - `build.sh` usa `CUR_PATH` sem defini-lo. O Dockerfile define a variável; o defeito é do upstream.
+
+## 11. Estado atual
+
+### Resultado
+
+| Verificação | Resultado |
+|---|---|
+| Arquivos estáticos | 98 de 99 requisições iguais ao Apache (OLS original: 31 de 62, num corpus menor) |
+| PHP | 21 de 21 iguais ao Apache com mod_php |
+| Recarregamento | Todos os cenários, sob carga e sem erros |
+| Política | 26 de 26 |
+| Memória | 100 mil URLs inexistentes: 0,5 MB, contra 68 MB no OLS original |
+| ASan | Nenhum erro, incluindo a liberação de contextos antigos sob carga |
+
+A divergência restante é o `charset` da página gerada por `ErrorDocument` com texto.
+
+Na comparação, `a,b` e `a, b` contam como iguais, assim como `public,max-age=60` e `max-age=60`.
+
+Desempenho: cerca de 26 mil req/s com `off`, `compat` e verificação a cada requisição, sem diferença mensurável. O
+cliente `ab` pode ser o limite nesse patamar, então isso não prova ausência de custo em cargas maiores.
+
+### Como ficou diferente do plano
+
+- **Contextos são substituídos, não atualizados.** O plano previa reaplicar a AST sobre os contextos. Foi mais simples
+  e seguro descartar os contextos dinâmicos afetados e recriá-los na requisição seguinte.
+- **Contextos configurados não são alterados.** Um contexto dinâmico com a mesma URI os sobrepõe, então apagar o
+  `.htaccess` restaura a configuração original.
+- **Ordem do rewrite:** o acesso é verificado antes dele, como no Apache. O redirecionamento de `Redirect` ocorre depois.
+
+### Limitações conhecidas
+
+| Tema | Comportamento |
+|---|---|
+| Nomes de host em `Allow`, `Deny` e `Require host` | Não são resolvidos, pois isso bloquearia o servidor. Nunca casam, e o log avisa. **`Deny from dominio` não bloqueia ninguém**: use endereços |
+| Vários `<Files>` no mesmo arquivo | Todos precisam permitir. O Apache deixa o último vencer, então aqui é mais restritivo |
+| `php_admin_value`, `php_admin_flag` | Ignorados com aviso. O Apache responde 500 |
+| `Header edit`, `echo`, `note`, `setifempty` | Ignorados com aviso |
+| `AuthType Digest`, `Require expr` | Sem suporte: o acesso é negado ou responde 500 |
+| `<If>` | Só `Require`, `Header`, `SetEnv*`, `BrowserMatch*` e `Redirect*`, com subconjunto das expressões |
+| `AddHandler` | Só tipos PHP |
+| `Options` | Só `Indexes`. `FollowSymLinks`, `MultiViews` e `ExecCGI` são ignorados |
+| `AddOutputFilter*`, `Deflate*` | Ignorados, pois o OLS comprime por conta própria |
+| Contexto configurado abaixo de um `.htaccess` | Não herda esse `.htaccess` |
+| `lsphp` no contêiner de teste | Roda à parte, porque o `cgid` não conseguiu iniciá-lo no Docker. Não foi investigado |
+
+### Pendências
+
+- Corpus maior, com arquivos `.htaccess` reais completos de plugins e aplicações.
+- Teste em servidor real com tráfego real antes de usar em produção.
+- Fases 4 e 5.

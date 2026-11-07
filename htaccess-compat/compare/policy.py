@@ -78,7 +78,7 @@ def run(r):
 
     uri = r.case("Require bogus-provider x\n")
     r.check("regra de acesso inválida nega", r.status("compat", uri), 403)
-    uri = r.case("Allow from not an address!\n")
+    uri = r.case("Allow from 300.1.2.3\n")
     r.check("endereço inválido nega", r.status("compat", uri), 403)
     uri = r.case("<If \"%{FOO\">\nRequire all granted\n</If>\n")
     r.check("expressão inválida nega", r.status("compat", uri), 403)
@@ -99,6 +99,14 @@ def run(r):
     r.check("arquivo grande demais nega", r.status("compat", uri), 403)
     uri = r.case("<IfModule x>\n" * 40 + "</IfModule>\n" * 40)
     r.check("aninhamento excessivo responde 500", r.status("compat", uri), 500)
+
+    uri = r.case("Header edit X-A \"a\" \"b\"\nHeader set X-Ok \"1\"\n")
+    r.check("Header edit não gera cabeçalho inválido", r.header("compat", uri, "edit"), None)
+    r.check("o restante do arquivo continua valendo", r.header("compat", uri, "x-ok"), "1")
+    uri = r.case("<IfFile /tmp>\nRequire all denied\n</IfFile>\n")
+    r.check("regra de acesso em bloco não suportado nega", r.status("compat", uri), 403)
+    uri = r.case("<If \"true\">\nOrder Deny,Allow\nDeny from all\n</If>\n")
+    r.check("regra de acesso não suportada em <If> nega", r.status("compat", uri), 403)
 
     # AllowOverride
     uri = r.case("Header set X-A \"1\"\nRequire all denied\n")

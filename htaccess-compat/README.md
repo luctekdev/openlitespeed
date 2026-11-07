@@ -22,23 +22,60 @@ docker build -f htaccess-compat/docker/ols.Dockerfile --target test -t ols-htacc
 docker run --rm --cap-add SYS_PTRACE ols-htaccess:test
 ```
 
-## Comparar com o Apache
+## Rodar todas as verificações
 
-Sobe Apache e OLS sobre o mesmo docroot, executa o corpus de [`compare/corpus.py`](compare/corpus.py) e grava
-a matriz em `compare/report/report.md`.
-
-```bash
-cd htaccess-compat/compare && mkdir -p report && docker compose run --rm runner
-```
-
-Para encerrar os contêineres:
+Gere as imagens `runtime` e `php`:
 
 ```bash
-docker compose down -v
+docker build -f htaccess-compat/docker/ols.Dockerfile --target runtime -t ols-htaccess:runtime .
 ```
 
-[`compare/BASELINE.md`](compare/BASELINE.md) guarda o resultado do OLS original, para acompanhar a evolução.
+```bash
+docker build -f htaccess-compat/docker/ols.Dockerfile --target php -t ols-htaccess:php .
+```
+
+Depois execute:
+
+```bash
+sh htaccess-compat/compare/all.sh
+```
+
+| Verificação | Arquivo | O que faz |
+|---|---|---|
+| Comparação estática | [`compare/corpus.py`](compare/corpus.py) | Mesmas requisições no Apache e no OLS |
+| Comparação com PHP | [`compare/corpus_php.py`](compare/corpus_php.py) | Idem, com mod_php e LSAPI |
+| Recarregamento | [`compare/reload.py`](compare/reload.py) | Edita arquivos em uso, também sob carga |
+| Política | [`compare/policy.py`](compare/policy.py) | Modos, `AllowOverride` e negação em caso de dúvida |
+
+`all.sh` falha se o número de requisições iguais ao Apache cair abaixo de
+[`compare/LATEST.md`](compare/LATEST.md) e [`compare/LATEST-PHP.md`](compare/LATEST-PHP.md). Ao melhorar a
+compatibilidade, atualize esses arquivos. [`compare/BASELINE.md`](compare/BASELINE.md) guarda o resultado do OLS
+original, para referência.
+
+## Rodar com ASan
+
+```bash
+docker build -f htaccess-compat/docker/ols.Dockerfile --target asan -t ols-htaccess:asan .
+```
+
+```bash
+OLS_IMAGE=ols-htaccess:asan LS_HTA_GRAVE_TICKS=1 sh htaccess-compat/compare/all.sh
+```
+
+`LS_HTA_GRAVE_TICKS=1` libera os contextos antigos em até 1 minuto, em vez de até 1 hora. Só existe no build Debug.
 
 ## Medir memória com diretórios inexistentes
 
 `compare/memprobe.py` envia URLs aleatórias, ou uma URL fixa com `--fixed`, como controle.
+
+## Configuração
+
+No bloco `rewrite` da vhost:
+
+| Chave | Valores | Padrão | Efeito |
+|---|---|---|---|
+| `autoLoadHtaccess` | `0`, `1` | `0` | Liga a leitura de `.htaccess` |
+| `htaccessMode` | `compat`, `strict`, `off` | `compat` | `strict` responde 500 a diretivas desconhecidas; `off` mantém o comportamento original |
+| `htaccessCheckInterval` | segundos, `0` a `3600` | `1` | Intervalo mínimo entre verificações de cada diretório |
+| `htaccessAllowOverride` | `All`, `None` ou lista | `All` | Como o `AllowOverride` do Apache |
+| `htaccessAllowProxy` | `0`, `1` | `0` | Permite `RewriteRule [P]` no `.htaccess` |
