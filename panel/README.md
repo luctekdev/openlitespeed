@@ -84,6 +84,36 @@ A configuração gerada fica em `/usr/local/lsws/conf/bridge/`, com `warnings.tx
 `.ini` dos pools e o script do Let's Encrypt ficam em `/usr/local/lsws/share/olsbridge/`, que o lsphp lê como o usuário
 do site. Ajustes manuais do servidor vão em `/usr/local/lsws/conf/bridge/server-extra.conf`, que é preservado.
 
+## No painel do HestiaCP
+
+```bash
+/usr/local/lsws/bin/olsbridge hestia-integrate
+```
+
+Acrescenta uma linha "OpenLiteSpeed" na seção Web Server de Configure Server, com o lápis para a página
+`/edit/server/litespeed/`. Na página, só para o admin:
+
+- escolher quem atende os sites: Apache, nginx e PHP-FPM; OpenLiteSpeed ao lado, para comparar; ou OpenLiteSpeed;
+- reiniciar o OpenLiteSpeed, ou o lsphp de cada versão do PHP;
+- ver o que da configuração não foi convertido.
+
+A troca leva alguns segundos, e os sites ficam fora enquanto as portas mudam de dono (6 s no itzvpc2). Se o
+OpenLiteSpeed não responder em todas as portas, a troca é desfeita.
+
+A página usa comandos no padrão do HestiaCP, que valem também na linha de comando e na API dele:
+
+| Comando | O que faz |
+|---|---|
+| `v-list-sys-litespeed [json\|shell\|plain\|csv]` | Modo, versão, serviços assumidos, PHP de cada versão e avisos |
+| `v-change-sys-web-litespeed replace\|offset\|off` | Troca quem atende os sites |
+| `v-restart-sys-litespeed` | Regenera e reinicia o OpenLiteSpeed sem derrubar conexões |
+| `v-restart-sys-litespeed-php [8.2]` | Reinicia o lsphp, de uma versão ou de todas |
+
+As ações vão para o log de atividade do HestiaCP. Os comandos e a página são arquivos novos, que as atualizações do
+HestiaCP não tocam. A linha na tela Web Server fica entre marcadores em `edit_server.php`, que o pacote do HestiaCP
+substitui; o gancho `/etc/hestiacp/hooks/post_install.sh`, que o pacote roda depois de cada atualização, coloca a linha
+de volta. `hestia-integrate --remove` tira tudo e deixa `edit_server.php` como era.
+
 ## PHP
 
 Cada pool do PHP-FPM (`/etc/php/X.Y/fpm/pool.d/*.conf`) vira um lsphp da mesma versão, do pacote `phpX.Y-litespeed`

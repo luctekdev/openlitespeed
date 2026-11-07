@@ -23,6 +23,7 @@ MSYS_NO_PATHCONV=1 docker run --rm "$image" tar -czf - -C /usr/local \
     --exclude=lsws/conf/olsbridge.conf lsws > "$work/lsws.tgz"
 cp panel/bridge/olsbridge.py "$work/olsbridge"
 cp panel/install-ols.sh "$work/install.sh"
+cp -r panel/hestia "$work/hestia"
 {
     echo "commit=$(git rev-parse HEAD)"
     echo "built_on=$base"

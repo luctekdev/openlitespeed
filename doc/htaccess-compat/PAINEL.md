@@ -31,6 +31,14 @@ Pelo próprio HestiaCP (`v-change-web-domain-backend-tpl`, `v-restart-service`, 
 
 Tudo chegou aos sites. Para voltar: `olsbridge uninstall`.
 
+Integração no painel (`olsbridge hestia-integrate`): a seção Web Server de Configure Server ganha a linha
+"OpenLiteSpeed", que leva a uma página para trocar entre Apache/nginx/PHP-FPM, teste lado a lado e OpenLiteSpeed, e
+para reiniciar o OLS e o lsphp. O HestiaCP não troca de servidor web depois de instalado (os lápis da seção só editam o
+arquivo de configuração de cada serviço), e um `WEB_SYSTEM=litespeed` exigiria mudar 23 scripts que comparam o servidor
+web com `apache2`, `httpd` ou `nginx`, perdidos a cada atualização. A página roda pelos mesmos comandos `v-*` da linha
+de comando, como `hestiaweb` via sudo; no itzvpc2 a troca deixou os sites 6 s fora, e cada ação foi para o log de
+atividade.
+
 O `check` e o `compare` acharam o que os templates do teste não tinham:
 
 | Achado | Efeito no OLS | Correção |
@@ -146,7 +154,8 @@ disfarce, mas o painel deixa de "achar que é Apache"; decidir no servidor de te
 | Pasta do cache por servidor e por domínio | 3 |
 | Redis por usuário, com padrão por plano e opção de Valkey | 4 |
 | Avisos ao administrador: erros da instalação e versão nova | 2 |
-| Interface no DirectAdmin; no HestiaCP, comandos e uma página própria | 5 |
+| HestiaCP: página OpenLiteSpeed em Configure Server, comandos `v-*` (CLI e API), sobrevive às atualizações | 5 (pronto) |
+| Interface no DirectAdmin | 5 |
 
 ## 5. Cuidados
 

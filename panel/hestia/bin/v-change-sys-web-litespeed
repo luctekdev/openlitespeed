@@ -1,0 +1,73 @@
+#!/bin/bash
+# info: switch the sites between OpenLiteSpeed and Apache/nginx/PHP-FPM
+# options: MODE
+# labels: hestia web
+#
+# example: v-change-sys-web-litespeed replace
+#
+# MODE is one of:
+#   replace  OpenLiteSpeed serves the sites; apache2, nginx and phpX.Y-fpm stay
+#            active for the panel but only reload OpenLiteSpeed
+#   offset   OpenLiteSpeed runs beside the current servers, on their ports + 10000,
+#            to compare before switching
+#   off      back to Apache, nginx and PHP-FPM
+# The panel keeps writing the Apache, nginx and PHP-FPM configuration as before.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+mode=$1
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+# load config file
+source_conf "$HESTIA/conf/hestia.conf"
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+check_args '1' "$#" 'MODE'
+case "$mode" in
+	replace | offset | off) ;;
+	*) check_result "$E_INVALID" "invalid mode: $mode (replace, offset or off)" ;;
+esac
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+# Perform verification if read-only mode is enabled
+check_hestia_demo_mode
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+if [ "$mode" = "off" ]; then
+	output=$("$OLSBRIDGE" uninstall 2>&1)
+else
+	output=$("$OLSBRIDGE" install --mode "$mode" 2>&1)
+fi
+result=$?
+echo "$output"
+if [ "$result" -ne 0 ]; then
+	$BIN/v-log-action "system" "Error" "Web" "OpenLiteSpeed: switching to $mode failed."
+	check_result "$E_RESTART" "OpenLiteSpeed: switching to $mode failed"
+fi
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+$BIN/v-log-action "system" "Info" "Web" "OpenLiteSpeed mode changed to $mode."
+log_event "$OK" "$ARGUMENTS"
+
+exit

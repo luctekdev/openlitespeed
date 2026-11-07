@@ -1,0 +1,52 @@
+#!/bin/bash
+# info: restart lsphp under OpenLiteSpeed (olsbridge)
+# options: [VERSION]
+# labels: hestia web
+#
+# example: v-restart-sys-litespeed-php 8.2
+#
+# Restarts lsphp gracefully: requests in progress finish, and the next ones use
+# the current php.ini and pool settings. Without VERSION, every version.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+version=$1
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+if [ -n "$version" ] && ! [[ "$version" =~ ^[0-9]+\.[0-9]+$ ]]; then
+	check_result "$E_INVALID" "invalid PHP version: $version"
+fi
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+# shellcheck disable=SC2086
+"$OLSBRIDGE" php-restart $version
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+$BIN/v-log-action "system" "Info" "Web" "OpenLiteSpeed: lsphp ${version:-all versions} restarted."
+log_event "$OK" "$ARGUMENTS"
+
+exit

@@ -1,0 +1,46 @@
+#!/bin/bash
+# info: restart OpenLiteSpeed (olsbridge)
+# options: NONE
+# labels: hestia web
+#
+# example: v-restart-sys-litespeed
+#
+# Regenerates the OpenLiteSpeed configuration from the panel's and restarts the
+# server gracefully: connections in progress finish on the old processes.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+"$OLSBRIDGE" reload > /dev/null 2>&1
+check_result $? "OpenLiteSpeed restart failed" "$E_RESTART"
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+$BIN/v-log-action "system" "Info" "Web" "OpenLiteSpeed restarted."
+log_event "$OK" "$ARGUMENTS"
+
+exit

@@ -11,6 +11,17 @@ upgrade=no
 [ "${1:-}" = "--upgrade" ] && upgrade=yes
 
 fail() { echo "erro: $*" >&2; exit 1; }
+
+# Página e comandos do HestiaCP. Se a integração já está instalada, ela é atualizada.
+install_addons() {
+    [ -d "$here/hestia" ] || return 0
+    rm -rf "$LSWS/add-ons/olsbridge-hestia"
+    mkdir -p "$LSWS/add-ons"
+    cp -r "$here/hestia" "$LSWS/add-ons/olsbridge-hestia"
+    if [ -e /usr/local/hestia/bin/v-list-sys-litespeed ]; then
+        "$LSWS/bin/olsbridge" hestia-integrate
+    fi
+}
 [ "$(id -u)" = 0 ] || fail "rode como root"
 [ "$(uname -m)" = x86_64 ] || fail "o pacote é para x86_64"
 command -v python3 >/dev/null || fail "a ponte precisa de python3"
@@ -32,6 +43,7 @@ if [ -e "$LSWS/bin/openlitespeed" ]; then
     mv -f "$LSWS/bin/openlitespeed.new" "$LSWS/bin/openlitespeed"
     cp -f "$tmp/lsws/modules/"*.so "$LSWS/modules/" 2>/dev/null || true
     install -m 755 "$here/olsbridge" "$LSWS/bin/olsbridge"
+    install_addons
     echo "Binário trocado (anterior: $LSWS/bin/openlitespeed.$stamp)."
     echo "Vale no próximo restart: systemctl restart olsbridge (offset) ou o serviço do Apache (replace)."
     exit 0
@@ -50,10 +62,12 @@ openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj "/CN=$(hostname -f 2>
 chown lsadm:lsadm "$LSWS/admin/conf/webadmin.key" "$LSWS/admin/conf/webadmin.crt"
 chmod 600 "$LSWS/admin/conf/webadmin.key" "$LSWS/admin/conf/webadmin.crt"
 install -m 755 "$here/olsbridge" "$LSWS/bin/olsbridge"
+install_addons
 cp "$here/VERSION" "$LSWS/VERSION.olsbridge"
 
 echo "Instalado em $LSWS. Nada foi iniciado e o Apache não foi tocado."
 echo "Próximos passos:"
+[ -d /usr/local/hestia ] && echo "  $LSWS/bin/olsbridge hestia-integrate   (página OpenLiteSpeed no HestiaCP)"
 echo "  $LSWS/bin/olsbridge check"
 echo "  $LSWS/bin/olsbridge install --mode offset"
 echo "  $LSWS/bin/olsbridge compare"

@@ -1784,7 +1784,158 @@ def cmd_reload(settings, only_if_changed=False):
     return 0
 
 
-def cmd_status(settings):
+def status_info(settings):
+    """Estado para a página do HestiaCP e para a API (v-list-sys-litespeed)."""
+    pid = ols_pid()
+    installed = os.path.exists(os.path.join(SYSTEMD, "olsbridge.service"))
+    units = [u for u in settings.get("units", "").split(",") if u]
+    mode = settings.get("mode", "offset") if installed else "off"
+    if mode == "replace" and not units:
+        mode = "offset"
+    code, out = run([os.path.join(LSWS, "bin", "openlitespeed"), "-v"])
+    version = out.splitlines()[0].split(" (")[0].strip() if code == 0 and out else ""
+    lsphp_on = settings.get("php", "lsphp") == "lsphp"
+    php = [{"version": v, "lsphp": os.access("/usr/bin/lsphp%s" % v, os.X_OK),
+            "served_by": "lsphp" if lsphp_on and os.access("/usr/bin/lsphp%s" % v, os.X_OK)
+            else "php-fpm"} for v in fpm_versions()]
+    warnings = []
+    try:
+        with open(os.path.join(OUT, "warnings.txt"), encoding="utf-8") as handle:
+            warnings = [l for l in handle.read().splitlines() if l]
+    except OSError:
+        pass
+    if mode == "off":
+        label = "off"
+    elif mode == "offset":
+        label = "testing beside the current servers (ports +%s)" % settings.get("port_offset")
+    else:
+        names = {"apache2": "Apache", "httpd": "Apache", "nginx": "nginx"}
+        replaced = [names[u] for u in units if u in names]
+        if any(re.match(r"^php.*-fpm$", u) for u in units):
+            replaced.append("PHP-FPM")
+        label = "active, in place of %s" % " + ".join(dict.fromkeys(replaced))
+    if mode != "off" and not pid:
+        label += " (stopped)"
+    return {"mode": mode, "label": label, "running": bool(pid), "pid": pid or 0,
+            "version": version, "units": units, "front": settings.get("front", ""),
+            "port_offset": settings.get("port_offset"), "php": php, "warnings": warnings}
+
+
+HESTIA = "/usr/local/hestia"
+HESTIA_ADDON = os.path.join(LSWS, "add-ons", "olsbridge-hestia")
+HESTIA_HOOK = "/etc/hestiacp/hooks/post_install.sh"
+HESTIA_FILES = [
+    "bin/v-list-sys-litespeed",
+    "bin/v-change-sys-web-litespeed",
+    "bin/v-restart-sys-litespeed",
+    "bin/v-restart-sys-litespeed-php",
+    "web/edit/server/litespeed/index.php",
+    "web/templates/pages/edit_server_litespeed.php",
+]
+HESTIA_ANCHOR = '<?php if (!empty($_SESSION["WEB_BACKEND"])) { ?>'
+HESTIA_ROW = """<!-- olsbridge:begin -->
+\t\t\t\t\t<?php exec(HESTIA_CMD . "v-list-sys-litespeed json", $olsb_out); $olsb = json_decode(implode("", $olsb_out), true); unset($olsb_out); ?>
+\t\t\t\t\t<p>
+\t\t\t\t\t\tOpenLiteSpeed:
+\t\t\t\t\t\t<span class="u-ml5"><?= tohtml(is_array($olsb) ? $olsb["label"] : _("unavailable")) ?></span>
+\t\t\t\t\t\t<a href="/edit/server/litespeed/" class="u-ml5"><i class="fas fa-pencil icon-orange"></i></a>
+\t\t\t\t\t</p>
+\t\t\t\t\t<!-- olsbridge:end -->
+\t\t\t\t\t"""
+HOOK_BLOCK = """# olsbridge:begin
+# Depois de cada atualização do HestiaCP: a linha do OpenLiteSpeed na tela Web Server.
+[ -x %s/bin/olsbridge ] && %s/bin/olsbridge hestia-integrate >/dev/null 2>&1
+# olsbridge:end
+""" % (LSWS, LSWS)
+
+
+def strip_block(text, begin, end):
+    start = text.find(begin)
+    if start < 0:
+        return text
+    stop = text.find(end, start)
+    if stop < 0:
+        return text
+    stop += len(end)
+    while stop < len(text) and text[stop] in " \t\n":
+        stop += 1
+    return text[:start] + text[stop:]
+
+
+def hestia_integrate(remove=False):
+    """Página do OpenLiteSpeed no HestiaCP, os comandos v-* e a linha na tela Web Server.
+
+    Os arquivos novos não são do pacote do HestiaCP e sobrevivem às atualizações; a
+    linha na tela é reaplicada pelo gancho post_install.sh que o pacote roda.
+    """
+    if not os.path.isdir(HESTIA):
+        print("HestiaCP não encontrado em %s." % HESTIA)
+        return 1
+    page = os.path.join(HESTIA, "web/templates/pages/edit_server.php")
+    try:
+        with open(page, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError as err:
+        print("não foi possível ler %s: %s" % (page, err.strerror))
+        return 1
+    text = strip_block(text, "<!-- olsbridge:begin -->", "<!-- olsbridge:end -->")
+    hook = ""
+    if os.path.exists(HESTIA_HOOK):
+        with open(HESTIA_HOOK, encoding="utf-8") as handle:
+            hook = strip_block(handle.read(), "# olsbridge:begin", "# olsbridge:end")
+    if remove:
+        for name in HESTIA_FILES:
+            path = os.path.join(HESTIA, name)
+            if os.path.exists(path):
+                os.remove(path)
+        try:
+            os.rmdir(os.path.join(HESTIA, "web/edit/server/litespeed"))
+        except OSError:
+            pass
+    else:
+        for name in HESTIA_FILES:
+            src = os.path.join(HESTIA_ADDON, name)
+            if not os.path.exists(src):
+                print("faltou %s; reinstale o pacote." % src)
+                return 1
+            dst = os.path.join(HESTIA, name)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copyfile(src, dst)
+            os.chmod(dst, 0o755 if name.startswith("bin/") else 0o644)
+        if HESTIA_ANCHOR not in text:
+            print("aviso: a tela Web Server mudou nesta versão do HestiaCP; a página continua em "
+                  "/edit/server/litespeed/")
+        else:
+            text = text.replace(HESTIA_ANCHOR, HESTIA_ROW + HESTIA_ANCHOR, 1)
+        if not hook.strip():
+            hook = "#!/bin/sh\n"
+        hook = hook.rstrip("\n") + "\n" + HOOK_BLOCK
+    write_keep(page, text)
+    if remove and hook.strip() in ("", "#!/bin/sh"):
+        if os.path.exists(HESTIA_HOOK):
+            os.remove(HESTIA_HOOK)
+    elif hook:
+        write(HESTIA_HOOK, hook, 0o755)
+    print("Integração com o HestiaCP %s." % ("removida" if remove else "instalada"))
+    return 0
+
+
+def write_keep(path, text):
+    """Reescreve mantendo dono e permissões do arquivo original."""
+    st = os.stat(path)
+    tmp = path + ".olsbridge"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    os.chown(tmp, st.st_uid, st.st_gid)
+    os.chmod(tmp, st.st_mode & 0o7777)
+    os.rename(tmp, path)
+
+
+def cmd_status(settings, as_json=False):
+    if as_json:
+        import json
+        print(json.dumps(status_info(settings), indent=1))
+        return 0
     pid = ols_pid()
     print("OLS: %s" % ("rodando (pid %d)" % pid if pid else "parado"))
     print("modo: %s%s" % (settings.get("mode"), " (+%s)" % settings.get("port_offset")
@@ -2294,9 +2445,13 @@ def cmd_unit_reload(settings, unit):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="command")
-    for name in ("generate", "start", "stop", "reload", "sync", "status", "uninstall", "check",
+    for name in ("generate", "start", "stop", "reload", "sync", "uninstall", "check",
                  "php-install"):
         sub.add_parser(name)
+    status = sub.add_parser("status")
+    status.add_argument("--json", action="store_true")
+    hestia = sub.add_parser("hestia-integrate", help="página e atalho no painel do HestiaCP")
+    hestia.add_argument("--remove", action="store_true")
     unit = sub.add_parser("unit-reload")
     unit.add_argument("unit")
     restart = sub.add_parser("php-restart")
@@ -2309,7 +2464,7 @@ def main(argv=None):
     compare.add_argument("--offset", type=int)
     args = parser.parse_args(argv)
     settings = Settings.load()
-    if args.command != "status" and not settings.get("apache_conf"):
+    if args.command not in ("status", "hestia-integrate") and not settings.get("apache_conf"):
         print("Configuração do Apache não encontrada.")
         return 1
     if args.command == "generate":
@@ -2337,7 +2492,9 @@ def main(argv=None):
         print("sem lsphp: %s" % (", ".join(missing) or "nenhuma versão"))
         return 1 if missing else 0
     if args.command == "status":
-        return cmd_status(settings)
+        return cmd_status(settings, args.json)
+    if args.command == "hestia-integrate":
+        return hestia_integrate(args.remove)
     if args.command == "check":
         return cmd_check(settings)
     if args.command == "compare":

@@ -1,0 +1,68 @@
+#!/bin/bash
+# info: OpenLiteSpeed status (olsbridge)
+# options: [FORMAT]
+# labels: hestia web
+#
+# example: v-list-sys-litespeed json
+#
+# Shows whether OpenLiteSpeed serves the sites in place of Apache, nginx and
+# PHP-FPM, which PHP versions run on lsphp, and the configuration warnings.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+format=${1-shell}
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+if [ ! -x "$OLSBRIDGE" ]; then
+	echo "Error: olsbridge is not installed"
+	exit "$E_NOTEXIST"
+fi
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+json=$("$OLSBRIDGE" status --json 2> /dev/null)
+case $format in
+	json) echo "$json" ;;
+	plain | shell | csv)
+		echo "$json" | python3 -c '
+import json, sys
+fmt = sys.argv[1]
+d = json.load(sys.stdin)
+rows = [("MODE", d["mode"]), ("STATUS", d["label"]), ("RUNNING", "yes" if d["running"] else "no"),
+        ("VERSION", d["version"]), ("SERVICES", " ".join(d["units"]) or "-"),
+        ("PHP", " ".join("%s:%s" % (p["version"], p["served_by"]) for p in d["php"]) or "-"),
+        ("WARNINGS", str(len(d["warnings"])))]
+if fmt == "csv":
+    print(",".join(k for k, _ in rows))
+    print(",".join("\"%s\"" % v.replace("\"", "\"\"") for _, v in rows))
+elif fmt == "plain":
+    print("\t".join(v for _, v in rows))
+else:
+    for k, v in rows:
+        print("%-10s %s" % (k + ":", v))
+' "$format"
+		;;
+esac
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+exit
