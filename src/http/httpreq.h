@@ -67,6 +67,8 @@ enum
 #define CACHE_KEY               (1<<17)
 #define CACHE_PRIVATE_KEY       (1<<18)
 #define AP_USER_DIR             (1<<19)
+//The response is a page made by the server, not by a handler
+#define SERVER_ERROR_PAGE       (1<<20)
 #define LOG_ACCESS_404          (1<<21)
 #define RESP_CONT_LEN_SET       (1<<22)
 
@@ -75,6 +77,7 @@ enum
 #define DUM_BENCHMARK_TOOL      (1<<26)
 #define EXEC_EXT_CMD            (1<<27)
 #define MP4_SEEK                (1<<28)
+//The response is a page made by the server, not by a handler
 #define EXEC_CMD_PARSE_RES      (1<<29)
 #define GLOBAL_VH_CTX           (1<<29)
 

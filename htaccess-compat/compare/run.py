@@ -16,7 +16,10 @@ import sys
 import time
 from dataclasses import dataclass, field
 
-from corpus import CASES
+import corpus
+import corpus_php
+
+CASES = corpus.CASES
 
 # Variam entre execuções ou entre servidores sem significar incompatibilidade.
 IGNORED_HEADERS = {
@@ -184,8 +187,13 @@ def main():
     parser.add_argument("--report", default="report.md")
     parser.add_argument("--apache", default="apache")
     parser.add_argument("--ols", default="ols")
+    parser.add_argument("--corpus", choices=("static", "php"), default="static")
     parser.add_argument("--fail-on-diff", action="store_true")
     args = parser.parse_args()
+
+    global CASES
+    if args.corpus == "php":
+        CASES = corpus_php.CASES
 
     for host in (args.apache, args.ols):
         if not wait_ready(host):

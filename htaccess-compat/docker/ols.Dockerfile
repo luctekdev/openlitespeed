@@ -70,6 +70,11 @@ RUN cd /work/openlitespeed && ./install.sh
 EXPOSE 8088 7080
 CMD ["/usr/local/lsws/bin/openlitespeed", "-n"]
 
+# OLS com PHP (LSAPI), para testar php_value e o caminho até a aplicação.
+FROM runtime AS php
+
+RUN curl -fsSL https://www.php.net/distributions/php-8.3.14.tar.gz | tar xz -C /work     && cd /work/php-8.3.14     && ./configure --disable-all --enable-litespeed --prefix=/usr/local/lsws/lsphp83        > /dev/null     && make -j"$(nproc)" > /dev/null     && mkdir -p /usr/local/lsws/lsphp83/bin     && cp sapi/litespeed/php /usr/local/lsws/lsphp83/bin/lsphp     && rm -rf /work/php-8.3.14
+
 # Servidor com ASan, para rodar a comparação e os testes de carga.
 #   OLS_IMAGE=ols-htaccess:asan docker compose ...
 FROM runtime AS asan

@@ -786,9 +786,31 @@ HttpContext *HttpVHost::htaRefresh(HttpContext *pContext, const char *pURI,
     LS_DBG_L("[%s] .htaccess changed in %s, rebuilding contexts.",
              getName(), pChanged->getLocation());
     m_contexts.detachHta(pChanged, m_htaGrave);
+    htaDropUrlCache();
     if (pConfigured)
         htaAddOverlay(pConfigured);
     return (HttpContext *)m_contexts.bestMatch(pURI, iUriLen);
+}
+
+
+/**
+ * The cache stores the response headers of static files, so what the old rules
+ * set would survive them. Entries in use are left for the next change.
+ */
+void HttpVHost::htaDropUrlCache()
+{
+    UrlStxFileHash::iterator iter, next;
+    for (iter = m_pUrlStxFileHash->begin(); iter != m_pUrlStxFileHash->end();)
+    {
+        static_file_data_t *pData = (static_file_data_t *)iter.second();
+        next = m_pUrlStxFileHash->next(iter);
+        if (pData->pData->getRef() <= 1)
+        {
+            m_pUrlStxFileHash->erase(iter);
+            delete pData;
+        }
+        iter = next;
+    }
 }
 
 

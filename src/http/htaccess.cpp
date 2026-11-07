@@ -38,6 +38,7 @@
 
 #include <arpa/inet.h>
 #include <ctype.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <netinet/in.h>
@@ -52,6 +53,7 @@
 //The file belongs to the site owner, who must not be able to exhaust memory.
 #define HTA_MAX_SIZE    (1024 * 1024)
 #define HTA_MAX_DEPTH   16
+#define HTA_PHP_TYPE    "application/x-httpd-php"
 #define HTA_ALL_METHODS (~(uint64_t)0)
 
 //The Apache version answered to <IfVersion>
@@ -1279,7 +1281,7 @@ static bool isIgnored(const char *pName)
         "RemoveOutputFilter", "SetOutputFilter", "SetInputFilter",
         "DeflateCompressionLevel", "ServerSignature",
         "LimitRequestBody", "CheckSpelling", "CGIPassAuth", "FileETag",
-        "AuthBasicProvider", "AuthMerging", "AddHandler", "SetHandler",
+        "AuthBasicProvider", "AuthMerging",
         "RemoveHandler", "RemoveType", "XBitHack", "DirectorySlash",
         "RewriteOptions", "ContentDigest", "EnableMMAP", "EnableSendfile",
         NULL
@@ -1288,6 +1290,37 @@ static bool isIgnored(const char *pName)
         if (strcasecmp(pName, s_ignored[i]) == 0)
             return true;
     return false;
+}
+
+
+/** Panels write versioned names, such as application/x-httpd-ea-php83. */
+static bool isPhpType(const char *pType)
+{
+    return strcasestr(pType, "php") != NULL
+           && strncasecmp(pType, "text/", 5) != 0;
+}
+
+
+static void addSuffixes(HttpContext *pContext, const char *pType,
+                        const std::vector<std::string> &args)
+{
+    for (size_t i = 1; i < args.size(); ++i)
+    {
+        const char *pSuffix = args[i].c_str();
+        if (*pSuffix == '.')
+            ++pSuffix;
+        pContext->addMIME(pType, pSuffix);
+    }
+}
+
+
+static void forceType(HtaBuild &b, HttpContext *pContext, const char *pType)
+{
+    //A type missing from mime.properties has to exist before it can be forced.
+    std::string type = pType;
+    if (strcasecmp(pType, "none") != 0)
+        pContext->addMIME(pType, "ls_hta_forcetype");
+    pContext->setForceType(&type[0], b.m_pVHost->getName());
 }
 
 
@@ -1593,22 +1626,22 @@ static void applyOne(HtaBuild &b, HttpContext *pContext, const HtaDirective &dir
     }
     else if (strcasecmp(pName, "AddType") == 0)
     {
-        for (size_t i = 1; i < args.size(); ++i)
-        {
-            const char *pSuffix = args[i].c_str();
-            if (*pSuffix == '.')
-                ++pSuffix;
-            pContext->addMIME(pArg, pSuffix);
-        }
+        addSuffixes(pContext, isPhpType(pArg) ? HTA_PHP_TYPE : pArg, args);
+    }
+    else if (strcasecmp(pName, "AddHandler") == 0)
+    {
+        if (isPhpType(pArg))
+            addSuffixes(pContext, HTA_PHP_TYPE, args);
+    }
+    else if (strcasecmp(pName, "SetHandler") == 0)
+    {
+        if (isPhpType(pArg))
+            forceType(b, pContext, HTA_PHP_TYPE);
+        else if (strcasecmp(pArg, "default-handler") == 0)
+            forceType(b, pContext, "text/plain");
     }
     else if (strcasecmp(pName, "ForceType") == 0)
-    {
-        //A type missing from mime.properties has to exist before it can be forced.
-        std::string type = pArg;
-        if (strcasecmp(pArg, "none") != 0)
-            pContext->addMIME(pArg, "ls_hta_forcetype");
-        pContext->setForceType(&type[0], b.m_pVHost->getName());
-    }
+        forceType(b, pContext, isPhpType(pArg) ? HTA_PHP_TYPE : pArg);
     else if (strcasecmp(pName, "AddDefaultCharset") == 0)
     {
         if (isOn(pArg))
@@ -1798,6 +1831,12 @@ int Htaccess::load(HttpVHost *pVHost, HttpContext *pContext)
     if (htaPath(pDir, achPath, sizeof(achPath)) == LS_FAIL
         || readFile(achPath, content) == LS_FAIL)
     {
+        //Removed after stat(): same as not having one.
+        if (errno == ENOENT)
+        {
+            stamp.m_iPresent = 0;
+            return 0;
+        }
         //Whatever the file protects must not become public.
         LS_WARN("[%s] Cannot read %s, denying access.", pVHost->getName(), achPath);
         ownRules(pContext)->m_bDenyAll = true;

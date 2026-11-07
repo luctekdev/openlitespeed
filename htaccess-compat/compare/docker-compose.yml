@@ -33,5 +33,37 @@ services:
       - ./report:/report
       - www:/www
 
+  # Comparação com PHP. Gere antes a imagem --target php.
+  apache-php:
+    image: php:8.3-apache
+    profiles: ["php"]
+    command: ["sh", "-c", "a2enmod rewrite headers expires >/dev/null && cp /compare/apache/php.conf /etc/apache2/sites-enabled/000-default.conf && exec apache2-foreground"]
+    volumes:
+      - ./:/compare:ro
+      - www:/www:ro
+
+  ols-php:
+    image: ${OLS_PHP_IMAGE:-ols-htaccess:php}
+    profiles: ["php"]
+    # lsphp roda à parte: o processo cgid não consegue iniciá-lo neste contêiner.
+    command: ["sh", "-c", "su -s /bin/sh nobody -c 'PHP_LSAPI_CHILDREN=8 /usr/local/lsws/lsphp83/bin/lsphp -b /tmp/lsphp.sock &' && exec /usr/local/lsws/bin/openlitespeed -n"]
+    volumes:
+      - ./ols/httpd_config_php.conf:/usr/local/lsws/conf/httpd_config.conf:ro
+      - ./ols/vhconf_php.conf:/usr/local/lsws/conf/vhosts/compat/vhconf.conf:ro
+      - www:/www:ro
+
+  runner-php:
+    image: python:3.12-slim
+    profiles: ["php"]
+    working_dir: /compare
+    command: ["python", "-B", "run.py", "--www", "/www", "--report", "/report/report-php.md", "--apache", "apache-php", "--ols", "ols-php", "--corpus", "php"]
+    depends_on:
+      - apache-php
+      - ols-php
+    volumes:
+      - ./:/compare:ro
+      - ./report:/report
+      - www:/www
+
 volumes:
   www:

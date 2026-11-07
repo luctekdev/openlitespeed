@@ -114,6 +114,14 @@ def run_scenarios(host, www):
     check(results, "<Files> negado depois de cache", fetch(host, page)[0], 403)
     write(conf, 'ExpiresActive On\nExpiresByType text/plain "access plus 1 hour"\n')
     check(results, "Expires aplicado", "max-age=3600" in fetch(host, page)[2].get("cache-control", ""), True)
+    write(conf, 'AddDefaultCharset UTF-8\n')
+    fetch(host, page)
+    check(results, "charset aplicado", fetch(host, page)[2].get("content-type"),
+          "text/plain; charset=UTF-8")
+    write(conf, 'AddType application/x-custom .txt\n')
+    fetch(host, page)
+    check(results, "tipo alterado", fetch(host, page)[2].get("content-type"),
+          "application/x-custom")
     write(conf, '<IfModule\n')
     check(results, "erro de sintaxe vira 500", fetch(host, page)[0], 500)
     write(conf, '# corrigido\n')
@@ -141,16 +149,24 @@ def run_load(host, www, seconds):
     bad, total = [], [0]
 
     def hammer():
+        # Conexão persistente: uma por requisição esgota as portas do cliente.
+        conn = http.client.HTTPConnection(host, 80, timeout=10)
         while time.time() < stop:
             for path in (f"{s.uri}/go", f"{s.uri}/sub/c.txt", f"{s.uri}/a.txt"):
                 try:
-                    code, _ = status(host, path)
-                except OSError as exc:
+                    conn.request("GET", path, headers={"Host": "compat.test"})
+                    resp = conn.getresponse()
+                    resp.read()
+                    code = resp.status
+                except (OSError, http.client.HTTPException) as exc:
                     bad.append(repr(exc))
+                    conn.close()
+                    conn = http.client.HTTPConnection(host, 80, timeout=10)
                     continue
                 total[0] += 1
                 if code not in (200, 404):
                     bad.append(f"{path} -> {code}")
+        conn.close()
 
     threads = [threading.Thread(target=hammer) for _ in range(16)]
     for thread in threads:

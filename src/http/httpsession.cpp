@@ -2898,12 +2898,12 @@ int HttpSession::assignHandler(const HttpHandler *pHandler)
             LS_DBG_M(getLogSession(), "HT_STATIC but not getUrlStaticFileData\n");
         break;
     case HandlerType::HT_PROXY:
+    case HandlerType::HT_LSAPI:
+    case HandlerType::HT_FASTCGI:
         m_request.applyHeaderOps(this, NULL);
         //fall through
-    case HandlerType::HT_FASTCGI:
     case HandlerType::HT_CGI:
     case HandlerType::HT_SERVLET:
-    case HandlerType::HT_LSAPI:
     case HandlerType::HT_MODULE:
     case HandlerType::HT_LOADBALANCER:
     case HandlerType::HT_SCGI:
@@ -3047,6 +3047,7 @@ int HttpSession::sendHttpError(const char *pAdditional)
 
 int HttpSession::sendDefaultErrorPage(const char * pAdditional)
 {
+    m_request.orContextState(SERVER_ERROR_PAGE);
     setState(HSS_WRITING);
     buildErrorResponse(pAdditional);
     endResponse(1);

@@ -245,6 +245,10 @@ CASES = [
     dict(name="line-continuation", group="core",
          htaccess="Header set X-Long \\\n  \"value\"\n",
          requests=[get("page.txt")]),
+    dict(name="header-on-redirect", group="mod_headers",
+         htaccess=("Header set X-Ok \"1\"\nHeader always set X-Always \"1\"\n"
+                   "Redirect 302 {base}/a {base}/b\n"),
+         requests=[get("a"), get("page.txt")]),
     dict(name="redirect-querystring", group="mod_alias",
          htaccess="Redirect 301 {base}/old {base}/new\n",
          requests=[get("old?x=1")]),

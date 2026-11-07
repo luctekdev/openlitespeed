@@ -2855,8 +2855,12 @@ int HttpReq::processURIEx(const char *pURI, int uriLen, int &cacheable)
         if (*(pBegin - 1) == '/')
             --pBegin;
     }
+    //processPath() applies what a directory configures for its files: Files
+    //rules, types and expiry. The cache knows none of that.
     if (m_pUrlStaticFileData
-        && m_pUrlStaticFileData->tmaccess == DateTime::s_curTime)
+        && m_pUrlStaticFileData->tmaccess == DateTime::s_curTime
+        && !(m_pContext && (m_pContext->shouldMatchFiles()
+                            || (m_pContext->getConfigBits2() & BIT2_HTA_DYNAMIC))))
     {
         //Serve the cached entry; a real path left from before an internal
         //redirect names another file.
@@ -4744,7 +4748,8 @@ int HttpReq::applyOps(HttpSession * pSession,
             if (iter->isComplexValue() || iter->getEnv())
                 return LS_AGAIN;
         }
-        if (iter->isOnSuccess() && getStatusCode() >= SC_400)
+        //An error status set by the application is a normal response to Apache.
+        if (iter->isOnSuccess() && getContextState(SERVER_ERROR_PAGE))
             continue;
         if (iter->getEnv())
         {

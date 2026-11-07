@@ -168,6 +168,7 @@ private:
                             size_t iUriLen);
     void         htaAddOverlay(HttpContext *pConfigured);
     void         htaRotateGrave();
+    void         htaDropUrlCache();
 
     ReqStats            m_reqStats;
     AccessLog          *m_pAccessLog[MAX_ACCESS_LOG];
