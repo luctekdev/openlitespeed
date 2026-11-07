@@ -363,6 +363,9 @@ plainconfKeywords plainconf::sKeywords[] =
     {"websocket",                                NULL},
     {"websocketlist",                            NULL},//!!
     {"workers",                                  NULL},
+    {"wpprotectblock",                           NULL},
+    {"wpprotectlimit",                           NULL},
+    {"wpprotectwindow",                          NULL},
     {"workingdir",                               NULL},
     {"zconfadclist",                             NULL},
     {"zconfauth",                                NULL},

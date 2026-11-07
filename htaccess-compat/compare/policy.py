@@ -59,6 +59,32 @@ class Runner:
         return fetch(self.host, vhost, f"{uri}/page.txt")[2].get(name)
 
 
+def post(host, vhost, path):
+    conn = http.client.HTTPConnection(host, 80, timeout=10)
+    try:
+        conn.request("POST", path, body="log=a&pwd=b", headers={
+            "Host": vhost, "Content-Type": "application/x-www-form-urlencoded"})
+        resp = conn.getresponse()
+        resp.read()
+        return resp.status, dict((k.lower(), v) for k, v in resp.getheaders())
+    finally:
+        conn.close()
+
+
+def run_wordpress(r):
+    uri = r.case("# vazio\n", {"wp-login.php": "login\n", "other.php": "x\n"})
+    codes = [post(r.host, "wp", f"{uri}/wp-login.php")[0] for _ in range(5)]
+    r.check("tentativas dentro do limite passam", 429 in codes, False)
+    code, headers = post(r.host, "wp", f"{uri}/wp-login.php")
+    r.check("além do limite é bloqueado", code, 429)
+    r.check("resposta informa a espera", int(headers.get("retry-after", "0")) > 0, True)
+    r.check("xmlrpc.php conta como login", post(r.host, "wp", f"{uri}/xmlrpc.php")[0], 429)
+    r.check("outras páginas não são afetadas", post(r.host, "wp", f"{uri}/other.php")[0] != 429, True)
+    r.check("GET no login continua liberado", r.status("wp", uri, "wp-login.php"), 200)
+    r.check("sem a opção não há limite",
+            any(post(r.host, "compat", f"{uri}/wp-login.php")[0] == 429 for _ in range(8)), False)
+
+
 def run(r):
     uri = r.case("Header set X-Mode \"on\"\nFooBar 1\n")
     r.check("compat ignora diretiva desconhecida", r.status("compat", uri), 200)
@@ -117,6 +143,7 @@ def run(r):
     r.check("AllowOverride olha dentro de IfModule",
             r.header("authonly", r.case("<IfModule mod_headers.c>\nHeader set X-A \"1\"\n</IfModule>\n"), "x-a"),
             None)
+    run_wordpress(r)
     return all(r.results)
 
 

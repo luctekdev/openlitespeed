@@ -49,6 +49,7 @@ services:
       - ./ols/policy_authonly.conf:/usr/local/lsws/conf/vhosts/authonly/vhconf.conf:ro
       - ./ols/policy_proxy.conf:/usr/local/lsws/conf/vhosts/proxy/vhconf.conf:ro
       - ./ols/policy_bench.conf:/usr/local/lsws/conf/vhosts/bench/vhconf.conf:ro
+      - ./ols/policy_wp.conf:/usr/local/lsws/conf/vhosts/wp/vhconf.conf:ro
       - www:/www:ro
 
   # Comparação com PHP. Gere antes a imagem --target php.

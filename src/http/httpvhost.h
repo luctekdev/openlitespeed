@@ -186,6 +186,9 @@ private:
     int8_t              m_iHtaOverride;
     int16_t             m_iHtaCheckInterval;
     int16_t             m_iHtaGraveTicks;
+    int32_t             m_iWpLimit;
+    int32_t             m_iWpWindow;
+    int32_t             m_iWpBlock;
 
     uint32_t            m_iFeatures;
 
@@ -300,6 +303,10 @@ public:
     {   return enableAutoLoadHt() && m_iHtaMode != HTA_OFF;   }
     int  getHtaMode() const             {   return m_iHtaMode;      }
     int  getHtaOverride() const         {   return m_iHtaOverride;  }
+
+    /** Returns 0, or the seconds a client has to wait before logging in. */
+    int  checkWpLogin(const struct sockaddr *pAddr, const char *pURI, int len) const;
+    int  isWpProtected() const          {   return m_iWpLimit;      }
     int  isHtaProxyAllowed() const      {   return m_iHtaProxy;     }
 
     const HttpContext *matchLocation(const char *pURI, size_t iUriLen,

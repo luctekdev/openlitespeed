@@ -26,6 +26,7 @@
 #include <http/hotlinkctrl.h>
 #include <http/htaccess.h>
 #include <http/htauth.h>
+#include <http/wpprotect.h>
 #include <http/httplog.h>
 #include <http/httpmime.h>
 #include <http/httpserverconfig.h>
@@ -268,6 +269,9 @@ HttpVHost::HttpVHost(const char *pHostName)
     , m_iHtaOverride(Htaccess::OVERRIDE_ALL)
     , m_iHtaCheckInterval(1)
     , m_iHtaGraveTicks(0)
+    , m_iWpLimit(0)
+    , m_iWpWindow(300)
+    , m_iWpBlock(900)
     , m_iFeatures(VH_ENABLE | VH_SERVER_ENABLE |
                   VH_ENABLE_SCRIPT | LS_ALWAYS_FOLLOW |
                   VH_GZIP)
@@ -460,6 +464,16 @@ void HttpVHost::logBytes(long long bytes)
 void HttpVHost::setAdminEmails(const char *pEmails)
 {
     m_sAdminEmails = pEmails;
+}
+
+
+int HttpVHost::checkWpLogin(const struct sockaddr *pAddr, const char *pURI,
+                            int len) const
+{
+    if (!m_iWpLimit || !WpProtect::isLoginUri(pURI, len))
+        return 0;
+    return WpProtect::attempt(pAddr, m_iWpLimit, m_iWpWindow, m_iWpBlock,
+                              DateTime::s_curTime);
 }
 
 
@@ -1059,6 +1073,18 @@ int HttpVHost::configBasics(const XmlNode *pVhConfNode, int iChrootLen)
 
     enable(ConfigCtx::getCurConfigCtx()->getLongValue(pVhConfNode, "enabled",
             0, 1, 1));
+    m_iWpLimit = ConfigCtx::getCurConfigCtx()->getLongValue(pVhConfNode,
+                                "wpProtectLimit", 0, 100000, 0);
+    m_iWpWindow = ConfigCtx::getCurConfigCtx()->getLongValue(pVhConfNode,
+                                "wpProtectWindow", 1, 86400, 300);
+    m_iWpBlock = ConfigCtx::getCurConfigCtx()->getLongValue(pVhConfNode,
+                                "wpProtectBlock", 1, 86400, 900);
+    if (m_iWpLimit && WpProtect::init() != 0)
+    {
+        LS_ERROR(ConfigCtx::getCurConfigCtx(),
+                 "Cannot allocate memory for WordPress protection, it is disabled.");
+        m_iWpLimit = 0;
+    }
     setEarlyHints(ConfigCtx::getCurConfigCtx()->getLongValue(
                       pVhConfNode, "enableEarlyHints", -1, 2, -1));
     enableGzip((HttpServerConfig::getInstance().getGzipCompress()) ?

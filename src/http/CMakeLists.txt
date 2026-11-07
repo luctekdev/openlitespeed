@@ -57,6 +57,7 @@ SET(http_STAT_SRCS
    sendfileinfo.cpp
    httpcontext.cpp
    htaccess.cpp
+   wpprotect.cpp
    httpserverversion.cpp
    vhostmap.cpp
    eventdispatcher.cpp

@@ -2419,6 +2419,23 @@ int HttpSession::processContextRewrite()
         return 0;
     }
 
+    if (m_request.getVHost()->isWpProtected()
+        && m_request.getMethod() == HttpMethod::HTTP_POST)
+    {
+        int wait = m_request.getVHost()->checkWpLogin(getPeerAddr(),
+                       m_request.getURI(), m_request.getURILen());
+        if (wait)
+        {
+            LS_NOTICE(getLogSession(), "[WP] Too many login attempts, blocked for "
+                      "%d seconds.", wait);
+            //The error page starts with empty headers, see prepareHeaders().
+            char achWait[16];
+            int len = snprintf(achWait, sizeof(achWait), "%d", wait);
+            m_request.addEnv("LS_RETRY_AFTER", 14, achWait, len);
+            return SC_429;
+        }
+    }
+
     //Apache checks access before per-directory rewrites. A rule must not be able
     //to move a request out of a protected directory before that happens.
     ret = Htaccess::checkAccess(this);
@@ -4884,6 +4901,14 @@ void HttpSession::prepareHeaders()
 
     if (m_request.getLocationLen() > 0 && m_request.getLocation() != NULL)
         addLocationHeader();
+
+    if (m_request.getStatusCode() == SC_429)
+    {
+        int len = 0;
+        const char *pWait = m_request.getEnv("LS_RETRY_AFTER", 14, len);
+        if (pWait)
+            headers.add("Retry-After", 11, pWait, len);
+    }
 
     m_request.applyHeaderOps(this, &headers);
 }
