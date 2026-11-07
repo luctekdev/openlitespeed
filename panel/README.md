@@ -103,7 +103,8 @@ Acrescenta uma linha "OpenLiteSpeed" na seção Web Server de Configure Server, 
 A troca leva alguns segundos, e os sites ficam fora enquanto as portas mudam de dono (6 s no itzvpc2). Se o
 OpenLiteSpeed não responder em todas as portas, a troca é desfeita.
 
-A página usa comandos no padrão do HestiaCP, que valem também na linha de comando e na API dele:
+A página usa comandos no padrão do HestiaCP, que valem também na linha de comando e na API dele. Saídas reais, o que
+muda no HestiaCP e o que a API dele aceita estão em [`hestia/COMANDOS.md`](hestia/COMANDOS.md).
 
 | Comando | O que faz |
 |---|---|
