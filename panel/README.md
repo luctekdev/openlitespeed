@@ -79,6 +79,9 @@ Outros comandos:
 | `olsbridge sync` | O que o timer roda a cada 30 segundos: gera de novo e recarrega se algo mudou |
 | `olsbridge php-restart [8.2 ...]` | Reinicia o lsphp sem derrubar requisições |
 | `olsbridge php-install` | Instala o `phpX.Y-litespeed` de cada versão do PHP-FPM |
+| `olsbridge set OPÇÃO VALOR` | `cache`, `http3`, `webp`, `protection`, `waf` (abaixo) |
+| `olsbridge stats` | Tempo real, IPs bloqueados e eventos do WAF, em JSON |
+| `olsbridge webp` | Cria as cópias WebP que faltam (o timer roda a cada 10 minutos) |
 
 A configuração gerada fica em `/usr/local/lsws/conf/bridge/`, com `warnings.txt` listando o que não foi convertido. Os
 `.ini` dos pools e o script do Let's Encrypt ficam em `/usr/local/lsws/share/olsbridge/`, que o lsphp lê como o usuário
@@ -193,6 +196,74 @@ Como o Apache faz:
   `mod_proxy_fcgi`. Um rewrite que gera PATH_INFO (o favicon do Roundcube) não funciona nesse modo: o OLS manda
   `REDIRECT_URL`, e o PHP-FPM procura o script por ele.
 
+## Performance e segurança
+
+As opções valem para o servidor inteiro. Mudam pela página do OpenLiteSpeed no painel, por
+`v-change-sys-litespeed-option OPÇÃO VALOR` ou por `olsbridge set OPÇÃO VALOR`.
+
+| Opção | Padrão | O que faz |
+|---|---|---|
+| `cache` | `on` | LSCache no servidor. Guarda só o que a aplicação pede: no WordPress, com o plugin LiteSpeed Cache. Quem não pede não é afetado |
+| `webp` | `on` | PNG e JPEG saem em WebP para o navegador que aceita (abaixo) |
+| `http3` | `off` | HTTP/3 (QUIC). Ligar abre UDP 443 no firewall do HestiaCP (regra HTTP3) |
+| `protection` | `standard` | `off`, `standard` ou `strict`: conexões por IP, reCAPTCHA sob ataque, login do WordPress e jails do fail2ban |
+| `waf` | `off` | `off`, `detect` ou `block`: ModSecurity com o OWASP CRS 4 e as exclusões do WordPress |
+
+Fixos, sem opção: brotli e gzip com cache em memória dos estáticos comprimidos, cache de sessão TLS e tickets,
+OCSP stapling, `expires` máximo nos estáticos como o `expires max` do nginx do HestiaCP. O `expires` do OLS vale
+também para o que o PHP gera, por isso cobre só tipos de arquivo estático (imagem, fonte, CSS, JS, PDF...), nunca
+HTML, JSON, XML ou texto.
+
+**WebP.** `olsbridge webp` cria `imagem.png.webp` ao lado de cada PNG/JPEG das pastas dos sites. O `cwebp` (pacote
+`webp`, instalado sozinho) roda com o usuário dono da imagem, e a cópia só fica se for ao menos 10% menor. Imagens de
+root, links simbólicos e pastas ocultas ficam de fora. Uma regra de rewrite serve a cópia quando o navegador aceita
+`image/webp`. Como a cópia está na mesma pasta, valem para ela as mesmas regras de acesso da original (`.htaccess`,
+senha), e as respostas levam `Vary: Accept`. O plugin LiteSpeed Cache usa o mesmo nome de arquivo, então os dois
+convivem. As cópias contam na cota e no backup do usuário.
+
+**Limite por IP.** O OLS conta as conexões em cada processo (worker), por isso a ponte divide os limites pelo número
+de workers. Acima do limite soft, o OLS desliga o keep-alive daquele IP: cada conexão fecha depois da resposta.
+Bane o IP (por `banPeriod`) quem passar do hard, ou ficar acima do soft por `gracePeriod` segundos, ou seja, quem
+**segura** conexões abertas (slowloris, uploads lentos, PHP lento sob ataque). Uma rajada de requisições completas
+não bane, mas fica limitada ao soft. Os IPs do próprio servidor não têm limite. O ban aparece no `error.log`, e o
+jail `olsbridge-limit` do fail2ban leva o IP para o firewall do HestiaCP.
+
+| Nível | Conexões por IP (soft / hard, grace) | Ban | PHP por IP | reCAPTCHA a partir de | Login do WordPress |
+|---|---|---|---|---|---|
+| `standard` | 300 / 600, 15 s | 10 min | sem limite | 8.000 conexões no servidor | 10 tentativas em 5 min, bloqueio de 15 min |
+| `strict` | 100 / 200, 10 s | 30 min | 30 req/s | 2.500 conexões no servidor | 5 tentativas em 5 min, bloqueio de 1 h |
+
+Jails do fail2ban (ação `hestia[name=WEB]`, visíveis e removíveis em Server → Firewall → Banlist):
+`olsbridge-limit` (limite por IP), `olsbridge-wp` (login do WordPress), `olsbridge-waf` (bloqueios do WAF) e
+`olsbridge-scan` (varredura de `.env`, `.git`, `wp-config` e afins).
+
+### Medições no itzvpc2 (2026-11-07)
+
+PageSpeed (Lighthouse 13.6 local, celular com 4G simulado, mediana de 5 rodadas), site WordPress com Elementor:
+
+| Servidor | Nota | LCP | Peso |
+|---|---|---|---|
+| nginx + Apache + PHP-FPM | 75 | 7,2 s | 2,8 MB |
+| OLS | 79 | 5,3 s | 2,8 MB |
+| OLS + WebP | 94 | 2,6 s | 525 KB |
+| OLS + WebP + plugin LiteSpeed Cache | 96 | 2,6 s | 525 KB |
+
+Com HTTP/3 desligado, o OLS fica em 75 (LCP 7,1 s): o HTTP/3 ajuda.
+
+Capacidade (h2load no próprio servidor, HTTPS/HTTP2, 8 vCPU), `bench/bench2.sh`:
+
+| Cenário | nginx + Apache + FPM | OLS + lsphp | OLS + LSCache |
+|---|---|---|---|
+| Estático (jQuery 87 KB, br/gzip), 50 conexões | 296 req/s | 41.444 req/s | 45.518 req/s |
+| Home do WordPress sem cache, 20 conexões | 70 req/s, 282 ms | 73 req/s, 273 ms | 52.638 req/s, 0,25 ms |
+| Post sem cache, 20 conexões | 73 req/s | 78 req/s | 33.938 req/s |
+| Home, 1 usuário | 118 ms | 109 ms | 0,21 ms |
+| TTFB remoto da home (São Paulo, mediana de 10) | 427 ms | — | 141 ms (104 ms são TCP+TLS) |
+
+O nginx do HestiaCP comprime o arquivo a cada requisição (`gzip_static` sem os `.gz`); sem compressão ele faz 1.807
+req/s. O OLS guarda a versão comprimida em memória. O PHP sem cache é limitado pelos 8 processos do pool nos dois. O
+WAF em `block` não mudou os números do PHP.
+
 ## Testes
 
 ```bash
@@ -219,7 +290,9 @@ sh panel/test/replace/run.sh
 
 O arranjo do itzvpc2, em Ubuntu 26.04 com o PHP do Sury: nginx na frente, Apache e PHP-FPM. Troca os três, confere o PHP
 pelo lsphp com o usuário, o `.user.ini` e o pool, muda o `php.ini` e um pool e reinicia o `php8.4-fpm` como o painel,
-faz 60 requisições num pool de 2 filhos, reinicia o OLS como num boot e desinstala.
+faz 60 requisições num pool de 2 filhos, liga o WAF, testa o WebP (cópia com o dono da imagem, WebP só para quem
+aceita) e o limite por IP (300 conexões slowloris de um segundo container: o IP é banido e os outros seguem
+atendidos), reinicia o OLS como num boot e desinstala. São 37 verificações.
 
 Os arquivos em `panel/test/hestia/fixtures/` e `panel/test/replace/fixtures/` vêm do
 [HestiaCP](https://github.com/hestiacp/hestiacp), sob GPLv3: os templates de domínio do commit `3c52c6c`;

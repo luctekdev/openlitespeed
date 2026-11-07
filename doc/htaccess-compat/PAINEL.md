@@ -4,6 +4,28 @@ Status: em desenvolvimento, iniciado em 2026-11-07. Num HestiaCP de verdade (itz
 PHP-FPM, com o lsphp da mesma versão de cada pool. DirectAdmin não foi testado. Uso e testes:
 [`panel/README.md`](../../panel/README.md).
 
+### Performance e segurança no itzvpc2 (2026-11-07)
+
+Medições completas e opções em [`panel/README.md`](../../panel/README.md#performance-e-segurança). Resumo:
+
+- PageSpeed celular (mediana de 5): nginx + Apache 75, OLS 79, OLS com WebP 94, mais o plugin LiteSpeed Cache 96. O
+  LCP foi de 7,2 s para 2,6 s, e a página de 2,8 MB para 525 KB. Uma rodada só do PageSpeed varia ±10 pontos: um
+  print de 85 com nginx e 75 com OLS foi essa variação, não o servidor.
+- Estático 140x mais rápido que o nginx do HestiaCP (que comprime a cada requisição); PHP sem cache igual (limitado
+  pelo pool); com o LSCache, a home sai em 0,25 ms.
+- WAF em `block` sem custo mensurável; WP admin, login e editor seguem funcionando.
+
+Achados e correções desta rodada:
+
+| Achado | Correção |
+|---|---|
+| `expires max` do nginx convertido para `text/*`, JSON e XML: HTML do WordPress, `wp-json` e sitemaps com cache de 10 anos | Só tipos estáticos |
+| Voltar de `replace` para `offset` religava o nginx com o OLS ainda nas portas 80/443: sites fora até subir à mão | O OLS sai das portas antes |
+| Cada start das unidades disfarçadas mandava SIGUSR1; em rajada, o systemd via o processo principal sair e reiniciava o serviço | Restart só quando a configuração muda, um por vez, esperando o processo novo |
+| O `phpX.Y-litespeed` do Sury traz um serviço que sobe o lsphp como root num socket no boot | Mascarado |
+| O teste do limite por IP usava rajadas, que o OLS limita sem banir | Teste com slowloris; o ban funciona |
+| `/list/server/` mostrava apache2, nginx e php-fpm parados | Linha do `litespeed`, os outros como atendidos pelo OLS, PHP como lsphp |
+
 ### HestiaCP real: itzvpc2 (2026-11-07)
 
 Ubuntu 26.04, HestiaCP 1.10.6, nginx nas portas 80/443 e Apache 2.4.66 em 8080/8443, PHP-FPM 7.4, 8.1, 8.2, 8.4 e 8.5
