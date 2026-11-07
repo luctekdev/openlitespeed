@@ -45,14 +45,18 @@ wait_ready apache ols ols-policy apache-php ols-php || exit 1
 compare runner report.md LATEST.md
 compare runner-php report-php.md LATEST-PHP.md
 
+# Cada suíte roda uma vez só: a de política deixa o cliente bloqueado no login.
+suite() {
+    output=$(compose run --rm -T runner python -B "$@" 2>&1) || status=1
+    echo "$output" | grep -E 'FALHOU|^carga|Traceback' || true
+    echo "$(echo "$output" | grep -c '^\[ok\]') verificações ok"
+}
+
 echo "--- recarregamento"
-compose run --rm -T runner python -B reload.py --load "${LOAD_SECONDS:-20}" 2>&1 \
-    | grep -E 'FALHOU|^carga' || true
-compose run --rm -T runner python -B reload.py >/dev/null 2>&1 || status=1
+suite reload.py --load "${LOAD_SECONDS:-20}"
 
 echo "--- política"
-compose run --rm -T runner python -B policy.py --host ols-policy 2>&1 | grep -E 'FALHOU' || true
-compose run --rm -T runner python -B policy.py --host ols-policy >/dev/null 2>&1 || status=1
+suite policy.py --host ols-policy
 
 for service in ols ols-policy ols-php; do
     count=$(compose exec -T "$service" sh -c 'ls /tmp/asan* 2>/dev/null | wc -l')
