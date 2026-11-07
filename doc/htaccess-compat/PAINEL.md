@@ -14,6 +14,23 @@ Antes de trocar, o OLS rodou em modo `offset` nas portas 10080/10443, que o fire
 do Let's Encrypt saiu idêntico ao do nginx em 40 de 40. Num pool de 8 filhos, 40 requisições simultâneas a um PHP de
 0,2 s deram 200, a mais lenta em 0,8 s. O phpMyAdmin, no pool `www` de 4 filhos, deu 30 de 30.
 
+Depois, `install --mode replace`: só o OLS escuta nas portas 80 e 443, e `apache2`, `nginx` e os cinco `phpX.Y-fpm`
+seguem ativos para o painel sem nenhum processo deles. O painel do HestiaCP (8083) tem nginx próprio e não muda. De
+fora, pela internet:
+
+- Os dois domínios com DNS têm certificado válido, HSTS onde o nginx tinha, HTTP redirecionado para HTTPS, `.env`
+  com 404, phpMyAdmin com 200 e `libraries` com 403, e o desafio do Let's Encrypt.
+- Pelo IP: webmail com o favicon do Roundcube, `README.md` do webmail com 404 e o teste22.
+
+Pelo próprio HestiaCP (`v-change-web-domain-backend-tpl`, `v-restart-service`, `v-add-web-domain` e
+`v-delete-web-domain`):
+
+- trocar o PHP do teste22 de 8.4 para 8.2 e voltar;
+- mudar `memory_limit`, `upload_max_filesize` e `max_execution_time` no `php.ini` e reiniciar o `php8.4-fpm`;
+- criar um domínio, servido na hora pelo OLS com PHP 8.5 e o usuário certo, e apagá-lo.
+
+Tudo chegou aos sites. Para voltar: `olsbridge uninstall`.
+
 O `check` e o `compare` acharam o que os templates do teste não tinham:
 
 | Achado | Efeito no OLS | Correção |
