@@ -73,6 +73,10 @@ sleep 2
 expect "WAF: SQL injection bloqueada" 403 "$(code "/who.txt?id=1%27%20OR%201=1--")"
 expect "WAF: página normal" 200 "$(code /who.txt?pagina=2)"
 expect "WAF: PHP normal" 200 "$(code /t.php)"
+# APIs REST (Laravel e afins) usam PUT, PATCH e DELETE; o CRS só aceita GET/HEAD/POST.
+for m in PUT PATCH DELETE; do
+    expect "WAF: $m de API" 200 "$(curl -s -o /dev/null -w '%{http_code}' -X $m -H 'Host: alpha.test'         -H 'Content-Type: application/json' -d '{"a":1}' "http://$IP/t.php")"
+done
 /usr/local/lsws/bin/olsbridge set waf off >/dev/null
 
 # WebP: a cópia é feita com o dono da imagem e sai só para quem aceita.

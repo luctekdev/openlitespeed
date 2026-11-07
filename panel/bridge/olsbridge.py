@@ -2135,8 +2135,16 @@ def waf_write(mode):
     def each(pattern):
         return ["Include %s" % p for p in sorted(glob.glob(pattern))]
 
+    # O CRS só aceita GET, HEAD, POST e OPTIONS (regra 911100): APIs REST (Laravel,
+    # WordPress, apps) usam PUT, PATCH e DELETE. Vem antes do REQUEST-901, que só põe o
+    # padrão se a variável estiver vazia.
+    write(os.path.join(MODSEC_DIR, "olsbridge-setup.conf"),
+          "# Gerado por olsbridge.\n"
+          "SecAction \"id:1009200,phase:1,pass,t:none,nolog,"
+          "setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PUT PATCH DELETE'\"\n")
     lines = ["# Gerado por olsbridge.", "Include %s/modsecurity.conf" % MODSEC_DIR,
-             "Include %s/crs-setup.conf" % crs]
+             "Include %s/crs-setup.conf" % crs,
+             "Include %s/olsbridge-setup.conf" % MODSEC_DIR]
     for stage in ("config", "before"):
         lines += each("%s/plugins/*-%s.conf" % (wpx, stage))
         lines += each("%s/plugins/*-%s.conf" % (crs, stage))
