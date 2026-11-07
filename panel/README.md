@@ -109,10 +109,24 @@ A página usa comandos no padrão do HestiaCP, que valem também na linha de com
 | `v-restart-sys-litespeed` | Regenera e reinicia o OpenLiteSpeed sem derrubar conexões |
 | `v-restart-sys-litespeed-php [8.2]` | Reinicia o lsphp, de uma versão ou de todas |
 
+Atalhos para a página: um raio na barra do topo, ao lado da engrenagem (só o admin vê), e o botão OpenLiteSpeed em
+Server (`/list/server/`).
+
+A lista de serviços em `/list/server/` mostra o OpenLiteSpeed como ele está:
+
+| Linha | No modo replace |
+|---|---|
+| `litespeed` | Estado, CPU, memória e tempo de vida dos processos do OLS. Reiniciar e parar valem: `litespeed.service` é um alias do `olsbridge.service` |
+| `apache2`, `nginx` | Ícone azul e linha apagada: "disabled, served by OpenLiteSpeed". O serviço segue ativo para o painel |
+| `phpX.Y-fpm` | Aparece como `lsphpX.Y`, com os números do lsphp daquela versão. Editar, reiniciar e parar continuam no `phpX.Y-fpm` |
+
+O `v-list-sys-services` passa a lista pelo `olsbridge hestia-services`; se a ponte falhar, a lista sai como sempre.
+
 As ações vão para o log de atividade do HestiaCP. Os comandos e a página são arquivos novos, que as atualizações do
-HestiaCP não tocam. A linha na tela Web Server fica entre marcadores em `edit_server.php`, que o pacote do HestiaCP
-substitui; o gancho `/etc/hestiacp/hooks/post_install.sh`, que o pacote roda depois de cada atualização, coloca a linha
-de volta. `hestia-integrate --remove` tira tudo e deixa `edit_server.php` como era.
+HestiaCP não tocam. Os trechos em arquivos do pacote do HestiaCP (`edit_server.php`, `panel.php`, `list_services.php`,
+`v-list-sys-services`) ficam entre marcadores; o pacote substitui esses arquivos, e o gancho
+`/etc/hestiacp/hooks/post_install.sh`, que ele roda depois de cada atualização, coloca os trechos de volta.
+`hestia-integrate --remove` tira tudo e deixa os arquivos como eram.
 
 ## PHP
 
@@ -131,7 +145,9 @@ versão sem lsphp continua no PHP-FPM.
 O `php.ini` é o do PHP-FPM da versão (`PHPRC`), que é o que o painel edita, e o `.user.ini` dos sites vale como no
 FPM (`LSPHP_ENABLE_USER_INI`). Quando o painel reinicia o `phpX.Y-fpm` depois de mudar o `php.ini` ou um pool, o lsphp
 daquela versão reinicia: o processo pai para de aceitar, os filhos terminam o que estão atendendo, e a próxima
-requisição já usa a configuração nova. Trocar a versão de um domínio no painel muda o socket na configuração do Apache, e
+requisição já usa a configuração nova. O pacote `phpX.Y-litespeed` traz um `phpX.Y-litespeed.service` que, no boot,
+sobe o lsphp como root num socket em `/run/php`; a ponte mascara esse serviço, porque quem roda o PHP é o OLS, com o
+usuário de cada pool. Trocar a versão de um domínio no painel muda o socket na configuração do Apache, e
 o domínio passa para o lsphp da versão nova. Cada requisição usa uma conexão com o lsphp, como o PHP-FPM com o
 `mod_proxy_fcgi`, e quem passa do limite do pool espera na fila.
 

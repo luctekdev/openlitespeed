@@ -2428,8 +2428,62 @@ HESTIA_ROW = """<!-- olsbridge:begin -->
 \t\t\t\t\t</p>
 \t\t\t\t\t<!-- olsbridge:end -->
 \t\t\t\t\t"""
+# Atalho na barra do topo, ao lado da engrenagem, só para o admin.
+HESTIA_TOPBAR = """<!-- olsbridge:begin -->
+\t\t\t\t\t\t\t<?php if ($_SESSION["userContext"] === "admin" && empty($_SESSION["look"]) && file_exists(dirname(__DIR__, 2) . "/edit/server/litespeed/index.php")) { ?>
+\t\t\t\t\t\t\t\t<li class="top-bar-menu-item">
+\t\t\t\t\t\t\t\t\t<a title="OpenLiteSpeed" class="top-bar-menu-link <?php if (strpos($_SERVER["REQUEST_URI"], "/edit/server/litespeed/") === 0) echo "active"; ?>" href="/edit/server/litespeed/">
+\t\t\t\t\t\t\t\t\t\t<i class="fas fa-bolt"></i>
+\t\t\t\t\t\t\t\t\t\t<span class="top-bar-menu-link-label u-hide-desktop">OpenLiteSpeed</span>
+\t\t\t\t\t\t\t\t\t</a>
+\t\t\t\t\t\t\t\t</li>
+\t\t\t\t\t\t\t<?php } ?>
+\t\t\t\t\t\t\t<!-- olsbridge:end -->
+\t\t\t\t\t\t\t"""
+HESTIA_SERVICES_BUTTON = """<!-- olsbridge:begin -->
+\t\t\t<a href="/edit/server/litespeed/" class="button button-secondary">
+\t\t\t\t<i class="fas fa-bolt icon-orange"></i>OpenLiteSpeed
+\t\t\t</a>
+\t\t\t<!-- olsbridge:end -->
+\t\t\t"""
+# Na lista: apache2 e nginx aparecem desativados (atendidos pelo OLS), e os phpX.Y-fpm
+# com o nome do lsphp. As ações continuam nos nomes reais dos serviços.
+HESTIA_SERVICES_ROW = """// olsbridge:begin
+\t\t\t\t$olsb_name = null;
+\t\t\t\tif (preg_match('/^php(\\d+\\.\\d+)-fpm$/', $key, $olsb_m) && strpos($data[$key]["SYSTEM"], "lsphp") !== false) {
+\t\t\t\t\t$olsb_name = "lsphp" . $olsb_m[1];
+\t\t\t\t}
+\t\t\t\tif (strpos($data[$key]["SYSTEM"], "served by OpenLiteSpeed") !== false) {
+\t\t\t\t\t$status = 'suspended';
+\t\t\t\t\t$state_icon = 'fa-circle-right icon-blue';
+\t\t\t\t}
+\t\t\t\t// olsbridge:end
+\t\t\t\t"""
+HESTIA_SERVICES_NAME = ("\t\t\t\t\t\t<?= tohtml($key) ?>\n\t\t\t\t\t</a>",
+                        "\t\t\t\t\t\t<?= tohtml($olsb_name ?? $key) /* olsbridge */ ?>\n"
+                        "\t\t\t\t\t</a>")
+HESTIA_SERVICES_DATA = """# olsbridge:begin
+# OpenLiteSpeed no lugar de apache2, nginx e PHP-FPM (olsbridge hestia-services).
+if [ -x %s/bin/olsbridge ]; then
+\tolsb_data=$(echo -e "$data" | %s/bin/olsbridge hestia-services 2>/dev/null) && [ -n "$olsb_data" ] && data="$olsb_data"
+fi
+# olsbridge:end
+""" % (LSWS, LSWS)
+# (arquivo, âncora, bloco inserido antes da âncora)
+HESTIA_PATCHES = [
+    ("web/templates/pages/edit_server.php", HESTIA_ANCHOR, HESTIA_ROW),
+    ("web/templates/includes/panel.php", "<!-- Server Settings -->", HESTIA_TOPBAR),
+    ("web/templates/pages/list_services.php", '<a href="/list/rrd/"', HESTIA_SERVICES_BUTTON),
+    ("web/templates/pages/list_services.php", "$cpu = $data[$key]['CPU'] / 10;",
+     HESTIA_SERVICES_ROW),
+    ("bin/v-list-sys-services", "# Listing data\n", HESTIA_SERVICES_DATA),
+]
+MARKERS = (("<!-- olsbridge:begin -->", "<!-- olsbridge:end -->"),
+           ("// olsbridge:begin", "// olsbridge:end"),
+           ("# olsbridge:begin", "# olsbridge:end"))
 HOOK_BLOCK = """# olsbridge:begin
-# Depois de cada atualização do HestiaCP: a linha do OpenLiteSpeed na tela Web Server.
+# Depois de cada atualização do HestiaCP: atalhos, a linha na tela Web Server e a lista
+# de serviços com o OpenLiteSpeed.
 [ -x %s/bin/olsbridge ] && %s/bin/olsbridge hestia-integrate >/dev/null 2>&1
 # olsbridge:end
 """ % (LSWS, LSWS)
@@ -2448,23 +2502,72 @@ def strip_block(text, begin, end):
     return text[:start] + text[stop:]
 
 
-def hestia_integrate(remove=False):
-    """Página do OpenLiteSpeed no HestiaCP, os comandos v-* e a linha na tela Web Server.
+def strip_patches(text):
+    for begin, end in MARKERS:
+        while True:
+            stripped = strip_block(text, begin, end)
+            if stripped == text:
+                break
+            text = stripped
+    return text.replace(HESTIA_SERVICES_NAME[1], HESTIA_SERVICES_NAME[0])
 
-    Os arquivos novos não são do pacote do HestiaCP e sobrevivem às atualizações; a
-    linha na tela é reaplicada pelo gancho post_install.sh que o pacote roda.
+
+def patch_hestia_files(remove):
+    """Aplica (ou tira) os trechos nos arquivos do pacote do HestiaCP."""
+    files = {}
+    for name, _anchor, _block in HESTIA_PATCHES:
+        if name in files:
+            continue
+        path = os.path.join(HESTIA, name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                files[name] = strip_patches(handle.read())
+        except OSError as err:
+            print("aviso: não foi possível ler %s: %s" % (path, err.strerror))
+    if not remove:
+        for name, anchor, block in HESTIA_PATCHES:
+            if name not in files:
+                continue
+            if anchor not in files[name]:
+                print("aviso: %s mudou nesta versão do HestiaCP; trecho do OpenLiteSpeed "
+                      "não aplicado ali (a página continua em /edit/server/litespeed/)" % name)
+                continue
+            files[name] = files[name].replace(anchor, block + anchor, 1)
+        name = "web/templates/pages/list_services.php"
+        if name in files and HESTIA_SERVICES_NAME[0] in files[name]:
+            files[name] = files[name].replace(*HESTIA_SERVICES_NAME, 1)
+    for name, text in files.items():
+        write_keep(os.path.join(HESTIA, name), text)
+
+
+def ensure_ols_alias(settings):
+    """Instalações de antes do Alias=litespeed.service ganham o nome novo."""
+    unit = os.path.join(SYSTEMD, "olsbridge.service")
+    try:
+        with open(unit, encoding="utf-8") as handle:
+            current = handle.read()
+    except OSError:
+        return
+    if "Alias=litespeed.service" in current:
+        return
+    values = {"bridge": os.path.join(LSWS, "bin", "olsbridge"), "pid": PID_FILE,
+              "mode": settings.get("mode", "offset")}
+    write(unit, OLS_UNIT % values)
+    systemctl("daemon-reload")
+    systemctl("enable", "olsbridge.service")
+
+
+def hestia_integrate(remove=False, settings=None):
+    """Página do OpenLiteSpeed no HestiaCP, os comandos v-* e os atalhos no painel.
+
+    Os arquivos novos não são do pacote do HestiaCP e sobrevivem às atualizações; os
+    trechos nos arquivos do pacote (linha na tela Web Server, ícone na barra do topo,
+    botão e lista de serviços) são reaplicados pelo gancho post_install.sh que o pacote
+    roda depois de cada atualização.
     """
     if not os.path.isdir(HESTIA):
         print("HestiaCP não encontrado em %s." % HESTIA)
         return 1
-    page = os.path.join(HESTIA, "web/templates/pages/edit_server.php")
-    try:
-        with open(page, encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError as err:
-        print("não foi possível ler %s: %s" % (page, err.strerror))
-        return 1
-    text = strip_block(text, "<!-- olsbridge:begin -->", "<!-- olsbridge:end -->")
     hook = ""
     if os.path.exists(HESTIA_HOOK):
         with open(HESTIA_HOOK, encoding="utf-8") as handle:
@@ -2488,15 +2591,12 @@ def hestia_integrate(remove=False):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             shutil.copyfile(src, dst)
             os.chmod(dst, 0o755 if name.startswith("bin/") else 0o644)
-        if HESTIA_ANCHOR not in text:
-            print("aviso: a tela Web Server mudou nesta versão do HestiaCP; a página continua em "
-                  "/edit/server/litespeed/")
-        else:
-            text = text.replace(HESTIA_ANCHOR, HESTIA_ROW + HESTIA_ANCHOR, 1)
         if not hook.strip():
             hook = "#!/bin/sh\n"
         hook = hook.rstrip("\n") + "\n" + HOOK_BLOCK
-    write_keep(page, text)
+        if settings is not None:
+            ensure_ols_alias(settings)
+    patch_hestia_files(remove)
     if remove and hook.strip() in ("", "#!/bin/sh"):
         if os.path.exists(HESTIA_HOOK):
             os.remove(HESTIA_HOOK)
@@ -2515,6 +2615,88 @@ def write_keep(path, text):
     os.chown(tmp, st.st_uid, st.st_gid)
     os.chmod(tmp, st.st_mode & 0o7777)
     os.rename(tmp, path)
+
+
+def process_table():
+    """pid, ppid, %cpu, memória (KB, como o HestiaCP soma), segundos de vida e nome."""
+    code, out = run(["ps", "-eo", "pid=,ppid=,pcpu=,size=,etimes=,comm="])
+    table = []
+    for line in out.splitlines() if code == 0 else []:
+        parts = line.split(None, 5)
+        if len(parts) == 6:
+            try:
+                table.append((int(parts[0]), int(parts[1]), float(parts[2]), int(parts[3]),
+                              int(parts[4]), parts[5].strip()))
+            except ValueError:
+                pass
+    return table
+
+
+def service_row(name, system, state, procs, rtime=None):
+    cpu = sum(p[2] for p in procs)
+    mem = sum(p[3] for p in procs) // 1024
+    if procs:
+        rtime = max(p[4] for p in procs) // 60
+    return "NAME='%s' SYSTEM='%s' STATE='%s' CPU='%s' MEM='%d' RTIME='%d'" % (
+        name, system, state, ("%.1f" % cpu).rstrip("0").rstrip("."), mem, rtime or 0)
+
+
+def hestia_services(settings, lines):
+    """A lista de v-list-sys-services com o OpenLiteSpeed: uma linha dele e, no modo
+    replace, apache2, nginx e phpX.Y-fpm como atendidos por ele (o lsphp de cada
+    versão sobe sob demanda, com os números dos processos dele)."""
+    procs = process_table()
+    pid = ols_pid()
+    ols = [p for p in procs if p[5] == "litespeed"]
+    if pid:
+        main = [p for p in ols if p[0] == pid]
+        ols = main + [p for p in ols if p[0] != pid]
+    state = "running" if pid else "stopped"
+    uptime = ols[0][4] // 60 if ols else 0
+    replace = settings.get("mode") == "replace"
+    units = [u for u in settings.get("units", "").split(",") if u] if replace else []
+    out = []
+    for line in lines:
+        fields = dict(re.findall(r"(\w+)='([^']*)'", line))
+        name = fields.get("NAME", "")
+        if not name or name == "litespeed":
+            if line.strip() and not name:
+                out.append(line)
+            continue
+        if name not in units:
+            out.append(line)
+            continue
+        match = re.match(r"^php(\d+\.\d+)-fpm$", name)
+        if match:
+            version = match.group(1)
+            mine = [p for p in procs if p[5] == "lsphp" + version]
+            # Sem requisição recente o lsphp não tem processo: vale o tempo do OLS.
+            out.append(service_row(name, "php interpreter · lsphp%s (LiteSpeed)" % version,
+                                   state, mine, uptime))
+        else:
+            out.append(service_row(name, "%s · disabled, served by OpenLiteSpeed" %
+                                   fields.get("SYSTEM", "web server"), state, [], uptime))
+    if replace:
+        names = [u for u in units if not u.startswith("php")]
+        if any(u.startswith("php") for u in units):
+            names.append("PHP-FPM")
+        label = "web server · OpenLiteSpeed" + (
+            " (in place of %s)" % " + ".join(names) if names else "")
+    else:
+        label = "web server · OpenLiteSpeed (port offset %s)" % settings.get("port_offset", "")
+    out.insert(0, service_row("litespeed", label, state, ols))
+    return out
+
+
+def cmd_hestia_services(settings):
+    lines = sys.stdin.read().splitlines()
+    try:
+        if os.path.exists(os.path.join(SYSTEMD, "olsbridge.service")):
+            lines = hestia_services(settings, lines)
+    except Exception:  # a lista do painel nunca pode quebrar por causa da ponte
+        pass
+    print("\n".join(lines))
+    return 0
 
 
 def cmd_status(settings, as_json=False):
@@ -2753,6 +2935,8 @@ RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
+# O nome que o HestiaCP mostra na lista de serviços e usa para reiniciar e parar.
+Alias=litespeed.service
 """
 
 SYNC_SERVICE = """[Unit]
@@ -2803,6 +2987,7 @@ def ensure_lsphp(once=False):
     É o mesmo PHP, com as mesmas extensões (mods-available é comum aos dois). Com
     once, cada versão é tentada uma vez por dia: o timer chama isto a cada 30 s.
     """
+    mask_lsphp_daemons()
     missing = [v for v in fpm_versions() if not os.access("/usr/bin/lsphp%s" % v, os.X_OK)]
     if not missing or not shutil.which("apt-get"):
         return missing
@@ -2819,7 +3004,30 @@ def ensure_lsphp(once=False):
                         ["php%s-litespeed" % v for v in todo], env=env)
         print("lsphp %s: %s" % (", ".join(todo), "instalado" if code == 0 else
                                 "falhou\n" + out[-2000:]))
-    return [v for v in missing if not os.access("/usr/bin/lsphp%s" % v, os.X_OK)]
+    missing = [v for v in missing if not os.access("/usr/bin/lsphp%s" % v, os.X_OK)]
+    if todo:
+        mask_lsphp_daemons()
+    return missing
+
+
+def mask_lsphp_daemons():
+    """O phpX.Y-litespeed traz um serviço que sobe o lsphp como root, ouvindo em
+    /run/php/lsphpX.Y.sock, no boot. Quem roda o PHP aqui é o OLS, com o usuário de cada
+    pool; esse daemon só abriria um PHP de root no socket. Fica mascarado, o que também
+    vale para as atualizações do pacote."""
+    masked = []
+    names = set()
+    for root in ("/lib/systemd/system", "/usr/lib/systemd/system"):
+        names.update(os.path.basename(p) for p in
+                     glob.glob(os.path.join(root, "php*-litespeed.service")))
+    for name in sorted(names):
+        link = os.path.join(SYSTEMD, name)
+        if os.path.islink(link) and os.readlink(link) == "/dev/null":
+            continue
+        systemctl("disable", "--now", name)
+        systemctl("mask", name)
+        masked.append(name)
+    return masked
 
 
 def served_units(settings):
@@ -3044,6 +3252,7 @@ def main(argv=None):
     setter.add_argument("value")
     hestia = sub.add_parser("hestia-integrate", help="página e atalho no painel do HestiaCP")
     hestia.add_argument("--remove", action="store_true")
+    sub.add_parser("hestia-services", help="filtro da lista de serviços do HestiaCP (stdin)")
     unit = sub.add_parser("unit-reload")
     unit.add_argument("unit")
     restart = sub.add_parser("php-restart")
@@ -3056,7 +3265,8 @@ def main(argv=None):
     compare.add_argument("--offset", type=int)
     args = parser.parse_args(argv)
     settings = Settings.load()
-    if args.command not in ("status", "hestia-integrate", "stats") and             not settings.get("apache_conf"):
+    if args.command not in ("status", "hestia-integrate", "stats", "hestia-services") and \
+            not settings.get("apache_conf"):
         print("Configuração do Apache não encontrada.")
         return 1
     if args.command == "generate":
@@ -3086,7 +3296,9 @@ def main(argv=None):
     if args.command == "status":
         return cmd_status(settings, args.json)
     if args.command == "hestia-integrate":
-        return hestia_integrate(args.remove)
+        return hestia_integrate(args.remove, settings)
+    if args.command == "hestia-services":
+        return cmd_hestia_services(settings)
     if args.command == "set":
         return cmd_set(settings, args.key, args.value)
     if args.command == "stats":
