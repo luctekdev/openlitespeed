@@ -1936,6 +1936,60 @@ def cmd_stop(_settings):
     return 0
 
 
+GRACEFUL_PID = "/tmp/lshttpd/graceful.pid"
+
+
+def ols_alive():
+    """O OLS roda: o processo principal, ou o antigo durante um restart gracioso (o
+    arquivo de PID some até o novo gravar o dele)."""
+    if ols_pid():
+        return True
+    try:
+        with open(GRACEFUL_PID) as handle:
+            os.kill(int(handle.read().strip()), 0)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def cmd_supervise(settings):
+    """O processo do olsbridge.service: sobe o OLS, sobe de novo se ele ficar 5 s sem
+    processo principal, e para o OLS no stop do serviço."""
+    stopping = []
+
+    def on_term(_signum, _frame):
+        stopping.append(1)
+
+    signal.signal(signal.SIGTERM, on_term)
+    signal.signal(signal.SIGINT, on_term)
+    with bridge_lock():
+        if ols_pid():
+            # Já rodando (o supervisor reiniciou, ou a unidade antiga subiu o OLS):
+            # assume o processo e aplica a configuração se ela mudou.
+            changed, _warnings = generate(settings, quiet=True)
+            if changed:
+                graceful_restart(ols_pid())
+        elif cmd_start(settings) != 0:
+            return 1
+    missing = 0
+    while not stopping:
+        time.sleep(1)
+        if ols_alive():
+            missing = 0
+            continue
+        missing += 1
+        if missing < 5 or stopping:
+            continue
+        with bridge_lock():
+            if not ols_alive() and not stopping:
+                print("OpenLiteSpeed sem processo principal há 5 s; subindo de novo",
+                      file=sys.stderr, flush=True)
+                lswsctrl("start")
+        missing = 0
+    cmd_stop(settings)
+    return 0
+
+
 def bridge_lock():
     """Uma geração e um restart por vez: o painel reinicia apache2, nginx e phpX.Y-fpm
     juntos, e o timer do sync roda a cada 30 s. Fechar o arquivo devolve a trava."""
@@ -1962,10 +2016,20 @@ def graceful_restart(pid):
     return False
 
 
+def current_pid(seconds=10):
+    """PID do processo principal; no meio de um restart gracioso, espera o novo."""
+    for _ in range(seconds * 10):
+        pid = ols_pid()
+        if pid or not ols_alive():
+            return pid
+        time.sleep(0.1)
+    return ols_pid()
+
+
 def cmd_reload(settings, only_if_changed=False):
     with bridge_lock():
         changed, _warnings = generate(settings, quiet=only_if_changed)
-        pid = ols_pid()
+        pid = current_pid()
         if not pid:
             return cmd_start(settings)
         if changed or not only_if_changed:
@@ -2787,21 +2851,25 @@ def patch_hestia_files(remove):
         write_keep(os.path.join(HESTIA, name), text)
 
 
-def ensure_ols_alias(settings):
-    """Instalações de antes do Alias=litespeed.service ganham o nome novo."""
+def ensure_ols_unit(settings):
+    """Instalações antigas ganham a unidade atual (o alias litespeed.service, o
+    supervisor). Sair do Type=forking pede um restart do serviço, uma vez só."""
     unit = os.path.join(SYSTEMD, "olsbridge.service")
     try:
         with open(unit, encoding="utf-8") as handle:
             current = handle.read()
     except OSError:
         return
-    if "Alias=litespeed.service" in current:
-        return
     values = {"bridge": os.path.join(LSWS, "bin", "olsbridge"), "pid": PID_FILE,
               "mode": settings.get("mode", "offset")}
-    write(unit, OLS_UNIT % values)
+    wanted = OLS_UNIT % values
+    if current == wanted:
+        return
+    write(unit, wanted)
     systemctl("daemon-reload")
     systemctl("enable", "olsbridge.service")
+    if "Type=forking" in current:
+        systemctl("restart", "--no-block", "olsbridge.service")
 
 
 def hestia_integrate(remove=False, settings=None):
@@ -2842,7 +2910,7 @@ def hestia_integrate(remove=False, settings=None):
             hook = "#!/bin/sh\n"
         hook = hook.rstrip("\n") + "\n" + HOOK_BLOCK
         if settings is not None:
-            ensure_ols_alias(settings)
+            ensure_ols_unit(settings)
     patch_hestia_files(remove)
     if remove and hook.strip() in ("", "#!/bin/sh"):
         if os.path.exists(HESTIA_HOOK):
@@ -3171,12 +3239,15 @@ Description=OpenLiteSpeed com a configuração do Apache (olsbridge, modo %(mode
 After=network.target
 
 [Service]
-Type=forking
-PIDFile=%(pid)s
+# O processo do serviço é a ponte, não o OLS. No restart gracioso o OLS apaga o arquivo
+# de PID, sobe um processo principal novo e o antigo sai; se o antigo sair antes de o
+# novo gravar o PID, o systemd toma a troca por uma queda e reinicia tudo.
+Type=simple
 PrivateTmp=false
-ExecStart=%(bridge)s start
+ExecStart=%(bridge)s supervise
 ExecReload=%(bridge)s reload
-ExecStop=%(bridge)s stop
+KillMode=mixed
+TimeoutStopSec=30
 Restart=on-failure
 RestartSec=2
 
@@ -3485,7 +3556,7 @@ def cmd_unit_reload(settings, unit):
     unidades sobem juntas, logo depois do OLS, que já está com a configuração atual."""
     with bridge_lock():
         changed, _warnings = generate(settings, quiet=True)
-        pid = ols_pid()
+        pid = current_pid()
         if not pid:
             systemctl("start", "--no-block", "olsbridge.service")
             return 0
@@ -3504,7 +3575,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="command")
     for name in ("generate", "start", "stop", "reload", "sync", "uninstall", "check",
-                 "php-install"):
+                 "php-install", "supervise"):
         sub.add_parser(name)
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
@@ -3540,6 +3611,8 @@ def main(argv=None):
         return 0
     if args.command == "start":
         return cmd_start(settings)
+    if args.command == "supervise":
+        return cmd_supervise(settings)
     if args.command == "stop":
         return cmd_stop(settings)
     if args.command == "reload":
@@ -3548,6 +3621,7 @@ def main(argv=None):
         if settings.get("php", "lsphp") == "lsphp":
             ensure_lsphp(once=True)
         ensure_webp_timer(settings)
+        ensure_ols_unit(settings)
         return cmd_reload(settings, only_if_changed=True)
     if args.command == "unit-reload":
         return cmd_unit_reload(settings, args.unit)

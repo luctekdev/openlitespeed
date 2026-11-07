@@ -146,7 +146,7 @@ O que se viu em `/usr/local/hestia/web/api/index.php` (HestiaCP 1.10.6) e na con
 | `/usr/local/lsws/conf/webp-state.json` | Total da última passada do WebP |
 | `/usr/local/lsws/logs/error.log`, `modsec_audit.log` | Log do OLS (bans por IP, login do WordPress) e do WAF (JSON) |
 | `/usr/local/lsws/add-ons/olsbridge-hestia/` | Cópia dos arquivos do HestiaCP, para reaplicar |
-| `olsbridge.service` (alias `litespeed.service`) | O processo do OLS; sobe no boot |
+| `olsbridge.service` (alias `litespeed.service`) | Sobe no boot. O processo principal é a ponte (`olsbridge supervise`), que sobe o OLS, o reinicia se ele cair (5 s) e o para no stop. `systemctl reload` faz restart gracioso |
 | `olsbridge-sync.timer` | A cada 30 s, regenera e recarrega se algo mudou |
 | `olsbridge-webp.timer` | A cada 10 min, cria as cópias WebP que faltam |
 | `olsbridge-unit@.service` | Usado pelos drop-ins de `apache2`, `nginx` e `phpX.Y-fpm` no modo replace |

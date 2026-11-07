@@ -24,6 +24,9 @@ Achados e correções desta rodada:
 | Cada start das unidades disfarçadas mandava SIGUSR1; em rajada, o systemd via o processo principal sair e reiniciava o serviço | Restart só quando a configuração muda, um por vez, esperando o processo novo |
 | O `phpX.Y-litespeed` do Sury traz um serviço que sobe o lsphp como root num socket no boot | Mascarado |
 | O teste do limite por IP usava rajadas, que o OLS limita sem banir | Teste com slowloris; o ban funciona |
+| Um restart gracioso isolado também podia derrubar o serviço: o OLS apaga o PID e o antigo às vezes sai antes de o novo gravar o dele | O systemd vigia a ponte (`olsbridge supervise`), não o PID do OLS. 30 restarts com WAF no itzvpc2: 450/450 respostas, nenhum restart do serviço |
+| WAF em `block` barrava PUT, PATCH e DELETE (APIs REST, Laravel) | Métodos liberados no CRS |
+| `RedirectMatch 403 /\.git` do Magento era ignorado: a pasta `.git` ficava pública | Status fora de 3xx sem URL, como no Apache |
 | `/list/server/` mostrava apache2, nginx e php-fpm parados | Linha do `litespeed`, os outros como atendidos pelo OLS, PHP como lsphp |
 
 ### HestiaCP real: itzvpc2 (2026-11-07)
@@ -133,7 +136,7 @@ painel ──apache2ctl configtest, nginx -t, php-fpm -t──▶ binários reai
   nginx de cada domínio e os pools do PHP-FPM, e gera listeners, vhosts, aliases, SSL, logs, regras do nginx e um lsphp
   por pool. O que não sabe converter vai para um relatório de avisos.
 - **Serviços disfarçados**: drop-ins em `apache2`, `nginx` e `phpX.Y-fpm` trocam o programa por um recarregamento do
-  OLS. O processo do OLS é do `olsbridge.service`, que sobe no boot.
+  OLS. O OLS é do `olsbridge.service`, que sobe no boot, com a ponte como processo do serviço (`olsbridge supervise`).
 - **Desfazer**: remover os drop-ins devolve os serviços originais. Nada do painel é alterado.
 
 ### Modos

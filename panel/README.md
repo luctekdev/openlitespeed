@@ -60,7 +60,9 @@ outro `Content-Type`, em geral só o charset de uma página de erro. Depois de c
 
 No modo `replace`, `apache2` (ou `httpd`), `nginx` e cada `phpX.Y-fpm` com lsphp ganham um drop-in em
 `/etc/systemd/system/<serviço>.service.d/zz-olsbridge.conf`. Eles param de iniciar os programas deles e passam a só
-recarregar o OLS; o painel continua vendo os três ativos. O processo do OLS é do `olsbridge.service`, que sobe no boot.
+recarregar o OLS; o painel continua vendo os três ativos. O OLS é do `olsbridge.service`, que sobe no boot. O processo do serviço é a ponte
+(`olsbridge supervise`), não o OLS: o processo principal do OLS muda a cada restart gracioso, e o systemd tomava a
+troca por uma queda. A ponte sobe o OLS de novo se ele ficar 5 s sem processo principal.
 Parar um dos serviços do painel não derruba os sites; quem para o OLS é `systemctl stop olsbridge`. Se o OLS não
 responder em todas as portas, a instalação volta para os serviços originais.
 
