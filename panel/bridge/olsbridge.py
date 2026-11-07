@@ -54,6 +54,9 @@ DEFAULTS = {
     "cache": "on",
     # HTTP/3 precisa de UDP 443 aberto no firewall; o painel abre ao ligar.
     "http3": "off",
+    # PNG e JPEG em WebP para quem aceita: uma cópia imagem.png.webp ao lado de cada
+    # imagem, feita com o usuário dono do site (olsbridge webp, timer de 10 minutos).
+    "webp": "on",
     # off, standard ou strict: limite por IP, reCAPTCHA sob ataque e login do WordPress.
     "protection": "standard",
     # off, detect (só registra) ou block: ModSecurity com as regras OWASP CRS.
@@ -1062,6 +1065,7 @@ class Generator(object):
         self.kinds = {}          # processador -> fcgi ou lsapi
         self.pool_of = {}        # processador lsapi -> pool do PHP-FPM
         self.extra_files = {}    # php/<processador>/pool.ini, acme/<vhost>/index.php
+        self.webp = settings.get("webp", DEFAULTS["webp"]) == "on"
 
     def processor(self, address):
         if address == "acme" and address not in self.processors:
@@ -1631,7 +1635,8 @@ class Generator(object):
                 (0 if allow.lower() == "none" else 1)]
         if allow.lower() not in ("all", "none"):
             out.append("    htaccessAllowOverride %s" % allow)
-        rules = front_rules + (vhost.rewrite if vhost.rewrite_on else [])
+        rules = front_rules + (WEBP_RULES if self.webp else []) + (
+            vhost.rewrite if vhost.rewrite_on else [])
         if rules:
             out.append("    rules                 <<<END_rules")
             out += rules
@@ -1649,11 +1654,13 @@ class Generator(object):
                     "    storagePath           %s/cachedata/%s" % (LSWS, vhost.name), "}", ""]
         front = self.front_of(vhost)
         if front is not None and front.expires:
-            # nginx: `expires max` nos arquivos estáticos que ele mesmo serve.
-            types = ["image/*", "text/*", "font/*", "audio/*", "video/*", "application/javascript",
-                     "application/x-javascript", "application/json", "application/xml",
-                     "application/pdf", "application/zip", "application/wasm",
-                     "application/vnd.ms-fontobject", "application/font-woff"]
+            # nginx: `expires max` nos arquivos estáticos que ele mesmo serve. O expires do
+            # OLS vale também para o que o PHP gera, então ficam de fora os tipos que o
+            # PHP responde: HTML, JSON (wp-json), XML (feeds, sitemaps) e texto (robots.txt).
+            types = ["image/*", "font/*", "audio/*", "video/*", "text/css", "text/javascript",
+                     "application/javascript", "application/x-javascript", "application/pdf",
+                     "application/zip", "application/wasm", "application/vnd.ms-fontobject",
+                     "application/font-woff", "application/font-woff2", "application/x-font-ttf"]
             out += ["expires {", "    enableExpires         1",
                     "    expiresByType         %s" % ", ".join("%s=A315360000" % t for t in types),
                     "}", ""]
@@ -1704,17 +1711,20 @@ class Generator(object):
                     "    location              %s/acme/%s/" % (PUB, vhost.ols_name),
                     "    allowBrowse           1",
                     "    addMIMEType           application/x-httpd-olsbacme php", "}", ""]
-        if vhost.headers or self.charset:
+        headers = [re.sub(r"(?i)^header\s+(always\s+)?", "", line) for line in vhost.headers]
+        if self.webp:
+            # A mesma URL sai em PNG ou em WebP conforme o Accept: caches e CDNs precisam saber.
+            headers.append("append Vary Accept")
+        if headers or self.charset:
             out += ["context / {", "    location              %s/" % vhost.docroot.rstrip("/"),
                     "    allowBrowse           1"]
             if self.charset and re.match(r"^[A-Za-z0-9_-]+$", self.charset):
                 # nginx: `charset utf-8` no texto que sai sem charset.
                 out += ["    addDefaultCharset     on",
                         "    defaultCharsetCustomized %s" % self.charset]
-            if vhost.headers:
+            if headers:
                 out.append("    extraHeaders          <<<END_headers")
-                for line in vhost.headers:
-                    out.append(re.sub(r"(?i)^header\s+(always\s+)?", "", line))
+                out += headers
                 out.append("    END_headers")
             out += ["}", ""]
         if vhost.env:
@@ -1972,6 +1982,11 @@ def status_info(settings):
         label += " (stopped)"
     options = dict((k, settings.get(k, DEFAULTS.get(k, "off"))) for k in OPTIONS)
     options["waf_available"] = os.path.exists(os.path.join(LSWS, "modules", "mod_security.so"))
+    webp = webp_state()
+    if webp.get("files"):
+        options["webp_stats"] = "%d images in WebP, %s saved (last pass %s)" % (
+            webp["files"], human_bytes(webp.get("saved", 0)),
+            time.strftime("%Y-%m-%d %H:%M", time.localtime(webp.get("at", 0))))
     return {"mode": mode, "label": label, "running": bool(pid), "pid": pid or 0,
             "options": options,
             "version": version, "units": units, "front": settings.get("front", ""),
@@ -2103,9 +2118,200 @@ def waf_write(mode):
     write(os.path.join(MODSEC_DIR, "main.conf"), "\n".join(lines) + "\n")
 
 
+WEBP_RULES = [
+    # Navegador que aceita WebP e cópia pronta ao lado da imagem. A cópia fica na mesma
+    # pasta, então valem para ela as mesmas regras de acesso (.htaccess, senha).
+    "RewriteCond %{HTTP_ACCEPT} image/webp",
+    "RewriteCond %{DOCUMENT_ROOT}%{REQUEST_URI} -f",
+    "RewriteCond %{DOCUMENT_ROOT}%{REQUEST_URI}.webp -f",
+    "RewriteRule ^(.+\\.(?:png|jpe?g))$ $1.webp [NC,L]",
+]
+WEBP_STATE = os.path.join(LSWS, "conf", "webp-state.json")
+WEBP_SERVICE = """[Unit]
+Description=Cópias WebP das imagens dos sites (olsbridge)
+
+[Service]
+Type=oneshot
+ExecStart=%(bridge)s webp
+Nice=15
+IOSchedulingClass=idle
+"""
+WEBP_TIMER = """[Unit]
+Description=Cópias WebP das imagens novas a cada 10 minutos
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+"""
+# Tudo o que grava na pasta do site roda com o usuário dono da imagem: converte num
+# arquivo temporário e só fica com o WebP se ele for ao menos 10% menor.
+WEBP_SCRIPT = (
+    '"$5" -quiet -mt -m 4 -q "$4" -alpha_q 100 -sharp_yuv -metadata none "$1" -o "$3" '
+    '2>/dev/null || { rm -f "$3"; exit 2; }; '
+    's=$(stat -c %s "$3"); if [ "$s" -lt "$2" ]; then mv -f "$3" "$1.webp"; '
+    'else rm -f "$3"; exit 3; fi')
+
+
+def human_bytes(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" if unit == "B" else "%.1f %s") % (n, unit)
+        n /= 1024.0
+
+
+def webp_state():
+    import json
+    try:
+        with open(WEBP_STATE, encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, ValueError):
+        return {}
+
+
+def ensure_cwebp():
+    tool = shutil.which("cwebp")
+    if tool or not shutil.which("apt-get"):
+        return tool
+    stamp = os.path.join(LSWS, "conf", ".webp-tentado")
+    if os.path.exists(stamp) and time.time() - os.path.getmtime(stamp) < 86400:
+        return None
+    open(stamp, "w").close()
+    run(["apt-get", "install", "-y", "-q", "webp"],
+        env=dict(os.environ, DEBIAN_FRONTEND="noninteractive"))
+    return shutil.which("cwebp")
+
+
+def webp_docroots(settings):
+    config = ApacheConfig(settings)
+    config.parse()
+    server = build(config)
+    # Pastas de root (o padrão do Apache, o Roundcube) ficam de fora em cmd_webp.
+    return sorted(set(v.docroot.rstrip("/") for v in server.vhosts
+                      if v.docroot and os.path.isdir(v.docroot)))
+
+
+def as_user(uid, gid):
+    def demote():
+        os.setgroups([])
+        os.setgid(gid)
+        os.setuid(uid)
+        os.umask(0o022)
+    return demote
+
+
+def cmd_webp(settings, budget=300):
+    """Cria imagem.png.webp ao lado de cada PNG/JPEG dos sites, com o dono da imagem.
+
+    Percorre as pastas dos sites inteiras (sem seguir links), converte o que é novo ou
+    mudou até o limite de tempo e deixa o resto para a próxima vez. Imagens de root,
+    links simbólicos e cópias que não ficam menores ficam de fora.
+    """
+    import json
+    import stat as st_mod
+    if settings.get("webp", DEFAULTS["webp"]) != "on":
+        return 0
+    if os.geteuid() != 0:
+        print("rode como root")
+        return 1
+    tool = ensure_cwebp()
+    if not tool:
+        print("cwebp não encontrado (pacote webp)")
+        return 1
+    state = webp_state()
+    old_skip = state.get("skip", {})
+    skip = {}
+    start = time.time()
+    files = saved = converted = pending = failed = 0
+    for root in webp_docroots(settings):
+        for base, dirs, names in os.walk(root):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d != "node_modules"]
+            for name in names:
+                if not name.lower().endswith((".png", ".jpg", ".jpeg")):
+                    continue
+                src = os.path.join(base, name)
+                try:
+                    info = os.lstat(src)
+                except OSError:
+                    continue
+                if not st_mod.S_ISREG(info.st_mode) or info.st_uid == 0 or \
+                        not 1024 <= info.st_size <= 25 << 20:
+                    continue
+                try:
+                    copy = os.lstat(src + ".webp")
+                except OSError:
+                    copy = None
+                if copy is not None:
+                    if not st_mod.S_ISREG(copy.st_mode):
+                        continue
+                    if copy.st_mtime >= info.st_mtime:
+                        files += 1
+                        saved += max(0, info.st_size - copy.st_size)
+                        continue
+                key = [int(info.st_mtime), info.st_size]
+                if old_skip.get(src) == key:
+                    skip[src] = key
+                    continue
+                if time.time() - start > budget:
+                    pending += 1
+                    continue
+                quality = "85" if name.lower().endswith(".png") else "82"
+                tmp = "%s.webp.olsb%d" % (src, os.getpid())
+                try:
+                    proc = subprocess.run(
+                        ["sh", "-c", WEBP_SCRIPT, "sh", src, str(info.st_size * 9 // 10), tmp,
+                         quality, tool], preexec_fn=as_user(info.st_uid, info.st_gid),
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+                    code = proc.returncode
+                except (subprocess.TimeoutExpired, OSError):
+                    code = 2
+                if code == 0:
+                    converted += 1
+                    files += 1
+                    try:
+                        saved += max(0, info.st_size - os.lstat(src + ".webp").st_size)
+                    except OSError:
+                        pass
+                else:
+                    failed += code == 2
+                    skip[src] = key
+    state = {"at": int(time.time()), "files": files, "saved": saved, "pending": pending,
+             "skip": skip}
+    tmp = WEBP_STATE + ".new"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(state, handle)
+    os.rename(tmp, WEBP_STATE)
+    print("WebP: %d novas, %d no total, %s economizados, %d para a próxima vez, %d com erro" %
+          (converted, files, human_bytes(saved), pending, failed))
+    return 0
+
+
+def ensure_webp_timer(settings):
+    """Liga ou desliga o timer do WebP conforme a opção; barato o bastante para o sync."""
+    service = os.path.join(SYSTEMD, "olsbridge-webp.service")
+    timer = os.path.join(SYSTEMD, "olsbridge-webp.timer")
+    want = settings.get("webp", DEFAULTS["webp"]) == "on" and \
+        os.path.exists(os.path.join(SYSTEMD, "olsbridge.service"))
+    if want and not os.path.exists(timer):
+        values = {"bridge": os.path.join(LSWS, "bin", "olsbridge")}
+        write(service, WEBP_SERVICE % values)
+        write(timer, WEBP_TIMER)
+        systemctl("daemon-reload")
+        systemctl("enable", "--now", "olsbridge-webp.timer")
+        systemctl("start", "--no-block", "olsbridge-webp.service")
+    elif not want and os.path.exists(timer):
+        systemctl("disable", "--now", "olsbridge-webp.timer")
+        for path in (service, timer):
+            os.remove(path)
+        systemctl("daemon-reload")
+
+
 OPTIONS = {
     "cache": ("on", "off"),
     "http3": ("on", "off"),
+    "webp": ("on", "off"),
     "protection": ("off", "standard", "strict"),
     "waf": ("off", "detect", "block"),
 }
@@ -2399,6 +2605,8 @@ def cmd_set(settings, key, value):
     settings.save()
     if key in ("protection", "waf"):
         apply_fail2ban(settings)
+    if key == "webp":
+        ensure_webp_timer(settings)
     if ols_pid():
         return cmd_reload(settings)
     generate(settings)
@@ -3123,14 +3331,21 @@ def cmd_install(settings, mode, offset):
     write(os.path.join(SYSTEMD, "olsbridge.service"), OLS_UNIT % values)
     write(os.path.join(SYSTEMD, "olsbridge-unit@.service"), UNIT_TEMPLATE % values)
     if mode == "offset":
-        # Voltando do replace: os serviços do painel voltam a ser os programas deles.
-        if previous:
-            remove_dropins(previous)
-            systemctl("daemon-reload")
-            systemctl("restart", *previous)
+        # Voltando do replace: os serviços do painel voltam a ser os programas deles. O
+        # OLS sai das portas antes: o nginx e o Apache não sobem com elas ocupadas.
         systemctl("daemon-reload")
         systemctl("enable", "olsbridge.service")
-        code, out = systemctl("restart", "olsbridge.service")
+        if previous:
+            systemctl("stop", "olsbridge.service")
+            remove_dropins(previous)
+            systemctl("daemon-reload")
+            systemctl("stop", *previous)
+            code, out = systemctl("start", *previous)
+            if code != 0:
+                print("aviso: %s não subiram:\n%s" % (", ".join(previous), out))
+            code, out = systemctl("start", "olsbridge.service")
+        else:
+            code, out = systemctl("restart", "olsbridge.service")
     else:
         print("Parando %s; o OLS assume as portas deles." % ", ".join(units))
         systemctl("stop", "olsbridge.service")
@@ -3155,6 +3370,7 @@ def cmd_install(settings, mode, offset):
         # Os serviços do painel ficam ativos, como o painel espera.
         code, out = systemctl("start", *units)
     systemctl("enable", "--now", "olsbridge-sync.timer")
+    ensure_webp_timer(settings)
     apply_fail2ban(settings)
     print("Instalado no modo %s. Avisos em %s/warnings.txt." % (mode, OUT))
     return 0 if code == 0 else 1
@@ -3167,9 +3383,11 @@ def cmd_uninstall(settings):
     if os.path.exists(dropin_path(service)) and service not in units:
         units.append(service)
     systemctl("disable", "--now", "olsbridge-sync.timer")
+    systemctl("disable", "--now", "olsbridge-webp.timer")
     systemctl("disable", "--now", "olsbridge.service")
     remove_dropins(units)
     for name in ("olsbridge.service", "olsbridge-sync.service", "olsbridge-sync.timer",
+                 "olsbridge-webp.service", "olsbridge-webp.timer",
                  "olsbridge-unit@.service"):
         path = os.path.join(SYSTEMD, name)
         if os.path.exists(path):
@@ -3247,6 +3465,8 @@ def main(argv=None):
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
     sub.add_parser("stats", help="tempo real, bloqueios e WAF, em JSON")
+    webp = sub.add_parser("webp", help="cópias WebP das imagens dos sites")
+    webp.add_argument("--budget", type=int, default=300, help="segundos de conversão")
     setter = sub.add_parser("set", help="cache, http3, protection, waf")
     setter.add_argument("key")
     setter.add_argument("value")
@@ -3283,6 +3503,7 @@ def main(argv=None):
     if args.command == "sync":
         if settings.get("php", "lsphp") == "lsphp":
             ensure_lsphp(once=True)
+        ensure_webp_timer(settings)
         return cmd_reload(settings, only_if_changed=True)
     if args.command == "unit-reload":
         return cmd_unit_reload(settings, args.unit)
@@ -3303,6 +3524,8 @@ def main(argv=None):
         return cmd_set(settings, args.key, args.value)
     if args.command == "stats":
         return cmd_stats()
+    if args.command == "webp":
+        return cmd_webp(settings, args.budget)
     if args.command == "check":
         return cmd_check(settings)
     if args.command == "compare":

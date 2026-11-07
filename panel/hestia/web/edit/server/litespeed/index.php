@@ -25,6 +25,7 @@ if (!empty($_GET["stats"])) {
 $options = [
 	"cache" => ["on", "off"],
 	"http3" => ["on", "off"],
+	"webp" => ["on", "off"],
 	"protection" => ["off", "standard", "strict"],
 	"waf" => ["off", "detect", "block"],
 ];
@@ -110,6 +111,7 @@ if (!is_array($olsb)) {
 $olsb_options = $olsb["options"] + [
 	"cache" => "on",
 	"http3" => "off",
+	"webp" => "off",
 	"protection" => "standard",
 	"waf" => "off",
 	"waf_available" => false,

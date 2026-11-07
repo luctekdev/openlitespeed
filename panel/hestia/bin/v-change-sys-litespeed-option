@@ -8,6 +8,7 @@
 # OPTION and VALUE:
 #   cache       on | off               LSCache for the applications that ask for it
 #   http3       on | off               HTTP/3 (QUIC); opens or closes UDP 443 in the firewall
+#   webp        on | off               WebP copies of PNG/JPEG for browsers that accept them
 #   protection  off | standard | strict  per-IP limits, reCAPTCHA under attack,
 #                                      WordPress login lockout, fail2ban jails
 #   waf         off | detect | block   ModSecurity with the OWASP Core Rule Set
@@ -35,7 +36,7 @@ OLSBRIDGE=/usr/local/lsws/bin/olsbridge
 
 check_args '2' "$#" 'OPTION VALUE'
 case "$option:$value" in
-	cache:on | cache:off | http3:on | http3:off) ;;
+	cache:on | cache:off | http3:on | http3:off | webp:on | webp:off) ;;
 	protection:off | protection:standard | protection:strict) ;;
 	waf:off | waf:detect | waf:block) ;;
 	*) check_result "$E_INVALID" "invalid option or value: $option $value" ;;

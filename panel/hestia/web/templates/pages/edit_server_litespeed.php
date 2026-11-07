@@ -98,6 +98,19 @@
 							<?= tohtml( _("Page cache in the web server. It stores only what the site asks for: install the LiteSpeed Cache plugin in WordPress (or the equivalent for other platforms) to use it. Sites that do not ask are not affected.")) ?>
 						</small>
 					</div>
+					<div class="u-mb20">
+						<label for="v_webp" class="form-label">WebP</label>
+						<select class="form-select" name="v_webp" id="v_webp">
+							<option value="on" <?= $olsb_options["webp"] == "on" ? "selected" : "" ?>><?= tohtml( _("On")) ?></option>
+							<option value="off" <?= $olsb_options["webp"] == "off" ? "selected" : "" ?>><?= tohtml( _("Off")) ?></option>
+						</select>
+						<small class="form-text">
+							<?= tohtml( _("PNG and JPEG images go out as WebP to the browsers that accept it, usually 70 to 95% smaller, with no change to the sites. A copy (image.png.webp) is made next to each image every 10 minutes, as the owner of the site.")) ?>
+							<?php if (!empty($olsb_options["webp_stats"])) { ?>
+								<br><?= tohtml($olsb_options["webp_stats"]) ?>
+							<?php } ?>
+						</small>
+					</div>
 					<div class="u-mb10">
 						<label for="v_http3" class="form-label">HTTP/3 (QUIC)</label>
 						<select class="form-select" name="v_http3" id="v_http3">
