@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # As listas do apt ficam: a ponte instala o phpX.Y-litespeed como faria no servidor.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl gnupg systemd systemd-sysv apache2 nginx python3 openssl \
-        iproute2 procps libaio1t64 \
+        iproute2 procps libaio1t64 nghttp2-client \
     && curl -fsSL https://packages.sury.org/php/apt.gpg -o /usr/share/keyrings/sury.gpg \
     && echo "deb [signed-by=/usr/share/keyrings/sury.gpg] https://packages.sury.org/php/ resolute main" \
         > /etc/apt/sources.list.d/php.list \

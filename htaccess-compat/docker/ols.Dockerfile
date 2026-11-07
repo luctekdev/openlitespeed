@@ -41,6 +41,15 @@ RUN git config core.symlinks true \
 ENV CUR_PATH=/work/openlitespeed
 RUN ./build.sh -o OFF -l OFF -p OFF && test -x build/src/openlitespeed
 
+# WAF: o módulo do ModSecurity ligado à libmodsecurity do sistema, que o apt atualiza.
+# No servidor, o pacote libmodsecurity3t64 (Ubuntu 24.04 e 26.04) basta.
+RUN apt-get update && apt-get install -y --no-install-recommends libmodsecurity-dev \
+    && cmake -S . -B build-modsec -DCMAKE_BUILD_TYPE=Release -DMOD_SECURITY=ON \
+             -DMODSEC_SYSTEM=ON -DMOD_PAGESPEED=OFF -DMOD_LUA=OFF >/dev/null \
+    && cmake --build build-modsec --target mod_security -j"$(nproc)" \
+    && cp build-modsec/src/modules/modsecurity-ls/mod_security.so dist/modules/ \
+    && ldd dist/modules/mod_security.so | grep -q libmodsecurity
+
 # Testes do upstream: build Debug (com ASan) a partir do código original, sem as
 # alterações que build.sh faz nos CMakeLists.
 #   docker build -f htaccess-compat/docker/ols.Dockerfile --target test -t ols-htaccess:test .

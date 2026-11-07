@@ -1,13 +1,49 @@
 #!/bin/sh
-# Sobe o container com systemd e roda o ciclo do modo replace.
+# Sobe o container com systemd e roda o ciclo do modo replace. O limite por IP é
+# testado de um segundo container: o OLS libera os IPs do próprio servidor.
 set -u
 name=olsbridge-replace-$$
-MSYS_NO_PATHCONV=1 docker run -d --name "$name" --privileged --cgroupns=host \
+client=olsbridge-client-$$
+export MSYS_NO_PATHCONV=1
+docker run -d --name "$name" --privileged --cgroupns=host \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw --tmpfs /run --tmpfs /run/lock \
     olsbridge-replace >/dev/null || exit 1
-trap 'docker rm -f "$name" >/dev/null 2>&1' EXIT
+trap 'docker rm -f "$name" "$client" >/dev/null 2>&1' EXIT
 for _ in $(seq 1 30); do
     docker exec "$name" systemctl is-system-running 2>/dev/null | grep -qE "running|degraded" && break
     sleep 1
 done
-MSYS_NO_PATHCONV=1 docker exec "$name" sh /test/cycle.sh
+docker exec "$name" sh /test/cycle.sh
+
+status=0
+ok() { echo "[ok] $1"; }
+fail() { echo "[FALHOU] $1"; status=1; }
+expect() {
+    if [ "$3" = "$2" ]; then ok "$1: $3"; else fail "$1: '$3', esperado '$2'"; fi
+}
+SIP=$(docker exec "$name" hostname -i | awk '{print $1}')
+get_code() {
+    docker exec "$1" curl -s -m 5 -o /dev/null -w '%{http_code}' -H "Host: alpha.test" \
+        "http://$SIP/who.txt"
+}
+docker exec "$name" /usr/local/lsws/bin/olsbridge set protection strict >/dev/null
+sleep 2
+docker run -d --name "$client" --entrypoint sleep olsbridge-replace 300 >/dev/null
+expect "outro IP antes do ataque" 200 "$(get_code "$client")"
+# 250 conexões ao mesmo tempo, acima do limite de 200 por IP do nível strict.
+docker exec "$client" h2load -t 2 -c 250 -n 2500 --h1 "http://$SIP/who.txt" \
+    -H "Host: alpha.test" >/dev/null 2>&1
+sleep 1
+docker exec "$name" grep -q "Reached per client hard connection limit" \
+    /usr/local/lsws/logs/error.log && ok "limite por IP registrado no error.log" \
+    || fail "limite por IP não registrado"
+expect "IP do ataque bloqueado" 000 "$(get_code "$client")"
+expect "o próprio servidor segue atendido" 200 "$(get_code "$name")"
+docker exec "$name" /usr/local/lsws/bin/olsbridge set protection standard >/dev/null
+docker exec "$name" systemctl restart olsbridge
+sleep 2
+expect "bloqueio some com o restart" 200 "$(get_code "$client")"
+docker rm -f "$client" >/dev/null
+
+docker exec "$name" sh /test/finish.sh || status=1
+exit $status

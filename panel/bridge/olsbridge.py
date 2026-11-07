@@ -49,7 +49,32 @@ DEFAULTS = {
     # lsphp: cada pool do PHP-FPM vira um lsphp da mesma versão, com o usuário e os
     # valores do pool. fpm: o OLS usa os sockets do PHP-FPM.
     "php": "lsphp",
+    # LSCache: só guarda o que a aplicação pede (o plugin LiteSpeed Cache do WordPress,
+    # por exemplo), então ligado não muda nenhum site que não o use.
+    "cache": "on",
+    # HTTP/3 precisa de UDP 443 aberto no firewall; o painel abre ao ligar.
+    "http3": "off",
+    # off, standard ou strict: limite por IP, reCAPTCHA sob ataque e login do WordPress.
+    "protection": "standard",
+    # off, detect (só registra) ou block: ModSecurity com as regras OWASP CRS.
+    "waf": "off",
 }
+
+# Níveis de proteção. Conexões simultâneas por IP: acima de soft por grace segundos,
+# ou acima de hard, o IP é bloqueado por ban segundos. Requisições dinâmicas por
+# segundo por IP passam a esperar acima de dyn (0: sem limite). O reCAPTCHA aparece
+# para todos, menos buscadores, quando o servidor passa de captcha conexões. O login do
+# WordPress bloqueia o IP depois de wp tentativas em wp_window segundos, por wp_block.
+PROTECTION = {
+    "off": None,
+    "standard": {"soft": 300, "hard": 600, "grace": 15, "ban": 600, "dyn": 0,
+                 "captcha": 8000, "wp": 10, "wp_window": 300, "wp_block": 900},
+    "strict": {"soft": 100, "hard": 200, "grace": 10, "ban": 1800, "dyn": 30,
+               "captcha": 2500, "wp": 5, "wp_window": 300, "wp_block": 3600},
+}
+BOT_WHITELIST = ["Googlebot", "bingbot", "DuckDuckBot", "YandexBot", "Baiduspider",
+                 "Applebot", "facebookexternalhit", "Twitterbot", "LinkedInBot",
+                 "Slackbot", "WhatsApp", "TelegramBot", "UptimeRobot", "Pingdom"]
 
 # Diretivas que não mudam o que o OLS precisa servir.
 IGNORED = set("""
@@ -103,7 +128,8 @@ class Settings(dict):
 
     def save(self, path=SETTINGS):
         keys = ["mode", "port_offset", "apache_conf", "apache_root", "apache_ctl", "service",
-                "php_max_conns", "panel", "php", "front", "front_service", "port_map", "units"]
+                "php_max_conns", "panel", "php", "front", "front_service", "port_map", "units",
+                "cache", "http3", "protection", "waf"]
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("# Gerado por olsbridge install; pode ser editado.\n")
@@ -1030,6 +1056,8 @@ class Generator(object):
         self.port_map = port_map(settings) if self.front else {}
         self.fronts = read_fronts() if self.front else {}
         self.charset = nginx_charset() if self.front else None
+        # O mesmo número que o OLS usaria sozinho, fixo para os limites por processo.
+        self.workers = max(1, min(os.cpu_count() or 1, 8))
         self.pools = read_pools() if settings.get("php", "lsphp") == "lsphp" else {}
         self.kinds = {}          # processador -> fcgi ou lsapi
         self.pool_of = {}        # processador lsapi -> pool do PHP-FPM
@@ -1104,6 +1132,9 @@ class Generator(object):
             env += ["%s=%s" % (k, v) for k, v in pool.env
                     if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", k) and "\n" not in v]
             user, group = pool.user, pool.group or pool.user
+        # Filhos que ficam vivos e aceitam conexões direto do socket, como os do PHP-FPM.
+        # Sem isto, com uma conexão por requisição, cada requisição criava um processo.
+        env.append("LSAPI_AVOID_FORK=200M")
         out = ["extprocessor %s {" % name,
                "    type                  lsapi",
                "    address               uds://tmp/lshttpd/%s.sock" % name,
@@ -1123,10 +1154,54 @@ class Generator(object):
                 "    memSoftLimit          2047M",
                 "    memHardLimit          2047M",
                 "    procSoftLimit         1000",
-                "    procHardLimit         1200"]
+                "    procHardLimit         1200",
+                # O OLS rodaria o PHP com nice 1; o PHP-FPM roda com 0.
+                "    priority              0"]
         if user:
             out += ["    extUser               %s" % user, "    extGroup              %s" % group]
         return out + ["}", ""]
+
+    def waf_mode(self):
+        mode = self.settings.get("waf", "off")
+        if mode == "off":
+            return None
+        if not (os.path.exists(os.path.join(LSWS, "modules", "mod_security.so")) and
+                os.path.isdir(waf_root("crs"))):
+            self.warnings.append("WAF %s pedido, mas o mod_security ou as regras faltam: "
+                                 "olsbridge set waf %s" % (mode, mode))
+            return None
+        waf_write(mode)
+        return mode
+
+    def protection_conf(self):
+        level = PROTECTION.get(self.settings.get("protection", "standard"))
+        if not level:
+            return []
+        # Cada processo do OLS conta as conexões de um IP só para si (não há memória
+        # compartilhada), e o kernel espalha as conexões de um IP entre os processos.
+        # Os limites do nível são do IP inteiro: cada processo fica com a sua parte.
+        share = lambda n: max(1, -(-n // self.workers)) if n else 0
+        return ["perClientConnLimit {",
+                "    staticReqPerSec       0",
+                "    dynReqPerSec          %d" % share(level["dyn"]),
+                "    outBandwidth          0",
+                "    inBandwidth           0",
+                "    softLimit             %d" % share(level["soft"]),
+                "    hardLimit             %d" % share(level["hard"]),
+                "    gracePeriod           %d" % level["grace"],
+                "    banPeriod             %d" % level["ban"],
+                "}", "",
+                # Sob ataque (conexões no servidor acima do limite), o visitante passa
+                # por um reCAPTCHA; buscadores e monitores passam direto.
+                "lsrecaptcha {",
+                "    enabled               1",
+                "    type                  1",
+                "    maxTries              3",
+                "    regConnLimit          %d" % share(level["captcha"]),
+                "    sslConnLimit          %d" % share(level["captcha"]),
+                "    allowedRobotHits      3",
+                "    botWhiteList          <<<END_bots",
+                ] + BOT_WHITELIST + ["END_bots", "}", ""]
 
     def port_of(self, port):
         """Porta do Apache -> porta em que o OLS escuta (a do nginx, se ele assume a frente)."""
@@ -1205,6 +1280,7 @@ class Generator(object):
                "user                      %s" % s.user,
                "group                     %s" % s.group,
                "priority                  0",
+               "httpdWorkers              %d" % self.workers,
                "autoRestart               1",
                "gracefulRestartTimeout    300",
                "mime                      conf/mime.properties",
@@ -1213,7 +1289,8 @@ class Generator(object):
                "disableWebAdmin           1",  # o painel não usa o WebAdmin do OLS
                "",
                "errorlog logs/error.log {",
-               "    logLevel              WARN",
+               # NOTICE: é onde o OLS registra os IPs que bloqueia (o fail2ban lê daqui).
+               "    logLevel              NOTICE",
                "    debugLevel            0",
                "    rollingSize           10M",
                "    enableStderrLog       1",
@@ -1236,9 +1313,29 @@ class Generator(object):
                "    maxReqBodySize        2047M",
                "    maxDynRespHeaderSize  32768",
                "    maxDynRespSize        2047M",
+               # Compressão: Brotli e gzip pré-comprimidos para estáticos, gzip no dinâmico.
                "    enableGzipCompress    1",
                "    enableDynGzipCompress 1",
-               "    quicEnable            0",
+               "    enableBrCompress      4",
+               "    gzipCompressLevel     6",
+               "    gzipStaticCompressLevel 6",
+               "    brStaticCompressLevel 6",
+               "    gzipAutoUpdateStatic  1",
+               "    gzipMinFileSize       300",
+               "    gzipMaxFileSize       10M",
+               "    compressibleTypes     default",
+               # Arquivos pequenos ficam em memória, os médios mapeados.
+               "    maxCachedFileSize     4096",
+               "    totalInMemCacheSize   20M",
+               "    maxMMapFileSize       256K",
+               "    totalMMapCacheSize    40M",
+               "    useSendfile           1",
+               "    sslSessionCache       1",
+               "    sslSessionCacheSize   1000000",
+               "    sslSessionCacheTimeout 3600",
+               "    sslSessionTickets     1",
+               "    quicEnable            %d" % (1 if self.settings.get("http3") == "on" else 0),
+               "    quicShmDir            /dev/shm/ols",
                "}",
                "",
                # Sem este bloco o OLS não configura o lscgid, e nenhum lsphp sobe com o
@@ -1264,7 +1361,9 @@ class Generator(object):
                "}",
                ""]
         allow = ["ALL"]
-        if s.proxy_header:
+        # Com o OLS no lugar do nginx não há proxy na frente: os IPs que o Apache
+        # aceitava (o nginx local) não devem ser tratados como proxy.
+        if s.proxy_header and not self.front:
             if s.proxy_header.lower() not in ("x-forwarded-for", "x-real-ip"):
                 self.warnings.append("RemoteIPHeader %s: o OLS só usa X-Forwarded-For" %
                                      s.proxy_header)
@@ -1272,6 +1371,23 @@ class Generator(object):
             allow += ["%sT" % p for p in s.proxies if re.match(r"^[0-9a-fA-F.:/]+$", p)]
         out += ["accessControl {", "    allow                 %s" % ", ".join(allow),
                 "    deny", "}", ""]
+        out += self.protection_conf()
+        if self.waf_mode():
+            out += ["module mod_security {", "    ls_enabled            1",
+                    "    modsecurity           on",
+                    "    modsecurity_rules_file %s/main.conf" % MODSEC_DIR, "}", ""]
+            self.log_files.append(MODSEC_AUDIT)
+        if self.settings.get("cache", "on") == "on":
+            # Só guarda o que a aplicação pede por cabeçalho (enableCache 0).
+            out += ["module cache {", "    ls_enabled            1",
+                    "    checkPrivateCache     1", "    checkPublicCache      1",
+                    "    maxCacheObjSize       10000000", "    maxStaleAge           200",
+                    "    qsCache               1", "    reqCookieCache        1",
+                    "    respCookieCache       1", "    ignoreReqCacheCtrl    1",
+                    "    ignoreRespCacheCtrl   0", "    enableCache           0",
+                    "    expireInSeconds       3600", "    enablePrivateCache    0",
+                    "    privateExpireInSeconds 3600",
+                    "    storagePath           %s/cachedata" % LSWS, "}", ""]
 
         conns = self.settings.get("php_max_conns", "10")
         for vhost in vhosts:
@@ -1316,6 +1432,9 @@ class Generator(object):
                     out += ["    keyFile               %s" % pair[0],
                             "    certFile              %s" % pair[1],
                             "    certChain             %d" % (1 if pair[2] else 0)]
+                out += ["    sslSessionCache       1", "    sslSessionTickets     1",
+                        "    enableQuic            %d" % (1 if self.settings.get("http3") == "on"
+                                                         else 0)]
             out.append("    map                   %s *" % mapped[0].ols_name)
             seen = set()
             for vhost in mapped:
@@ -1518,6 +1637,16 @@ class Generator(object):
             out += rules
             out.append("    END_rules")
         out += ["}", ""]
+        level = PROTECTION.get(self.settings.get("protection", "standard"))
+        if level:
+            # Login do WordPress: wp-login.php e xmlrpc.php, por IP.
+            out += ["wpProtectLimit            %d" % level["wp"],
+                    "wpProtectWindow           %d" % level["wp_window"],
+                    "wpProtectBlock            %d" % level["wp_block"], ""]
+        if self.settings.get("cache", "on") == "on":
+            out += ["module cache {", "    ls_enabled            1",
+                    # Uma pasta por domínio: HTTP e HTTPS limpam o mesmo cache.
+                    "    storagePath           %s/cachedata/%s" % (LSWS, vhost.name), "}", ""]
         front = self.front_of(vhost)
         if front is not None and front.expires:
             # nginx: `expires max` nos arquivos estáticos que ele mesmo serve.
@@ -1595,7 +1724,12 @@ class Generator(object):
             if pair:
                 out += ["vhssl {", "    keyFile               %s" % pair[0],
                         "    certFile              %s" % pair[1],
-                        "    certChain             %d" % (1 if pair[2] else 0), "}", ""]
+                        "    certChain             %d" % (1 if pair[2] else 0),
+                        # O navegador não precisa consultar a CA a cada visita.
+                        "    enableStapling        1",
+                        "    ocspRespMaxAge        86400",
+                        "    sslSessionCache       1",
+                        "    sslSessionTickets     1", "}", ""]
             else:
                 self.warnings.append("%s: SSL sem certificado" % vhost.label)
         return "\n".join(out) + "\n"
@@ -1629,6 +1763,7 @@ def generate(settings, quiet=False):
         changed = True
 
     prepare_logs(server, generator.log_files)
+    prepare_cache(server, settings)
     if changed:
         # Primeiro o que o lsphp lê, depois a configuração que aponta para lá.
         swap_dir(PUB, public, lambda _name: 0o644, dir_mode=0o755)
@@ -1665,6 +1800,25 @@ def swap_dir(target, files, mode_of, dir_mode=None):
         os.rename(target, old)
     os.rename(new, target)
     shutil.rmtree(old, ignore_errors=True)
+
+
+def prepare_cache(server, settings):
+    """O LSCache grava com o usuário dos processos do OLS; o pacote deixa a pasta com nobody."""
+    if settings.get("cache", "on") != "on" or os.geteuid() != 0:
+        return
+    try:
+        import grp
+        import pwd
+        uid = pwd.getpwnam(server.user).pw_uid
+        gid = grp.getgrnam(server.group).gr_gid
+    except (ImportError, KeyError):
+        return
+    path = os.path.join(LSWS, "cachedata")
+    os.makedirs(path, exist_ok=True)
+    st = os.stat(path)
+    if (st.st_uid, st.st_gid) != (uid, gid):
+        os.chown(path, uid, gid)
+    os.chmod(path, 0o750)
 
 
 def prepare_logs(server, paths):
@@ -1816,9 +1970,439 @@ def status_info(settings):
         label = "active, in place of %s" % " + ".join(dict.fromkeys(replaced))
     if mode != "off" and not pid:
         label += " (stopped)"
+    options = dict((k, settings.get(k, DEFAULTS.get(k, "off"))) for k in OPTIONS)
+    options["waf_available"] = os.path.exists(os.path.join(LSWS, "modules", "mod_security.so"))
     return {"mode": mode, "label": label, "running": bool(pid), "pid": pid or 0,
+            "options": options,
             "version": version, "units": units, "front": settings.get("front", ""),
             "port_offset": settings.get("port_offset"), "php": php, "warnings": warnings}
+
+
+# WAF: ModSecurity v3 com o OWASP CRS e as exclusões do WordPress. Versões fixadas com
+# o SHA-256 do arquivo publicado; outra versão é outro par de valores aqui.
+MODSEC_DIR = os.path.join(LSWS, "conf", "modsec")
+MODSEC_AUDIT = os.path.join(LSWS, "logs", "modsec_audit.log")
+WAF_SOURCES = {
+    "crs": ("4.30.0", "https://github.com/coreruleset/coreruleset/releases/download/v4.30.0/"
+            "coreruleset-4.30.0-minimal.tar.gz",
+            "3d678a41fd5aade34760127fef5dd64fd7a77848913fc0f70dde0cf467c94427"),
+    "wordpress": ("1.2.0", "https://github.com/coreruleset/wordpress-rule-exclusions-plugin/"
+                  "archive/refs/tags/v1.2.0.tar.gz",
+                  "8a1fc80dcf6030b13f856dcaa72dcac898b4375fe5a41689ed96d6e895929439"),
+}
+
+MODSEC_BASE = """# Gerado por olsbridge. ModSecurity v3, com o OWASP CRS.
+SecRuleEngine %(engine)s
+SecRequestBodyAccess On
+SecRequestBodyLimit 134217728
+SecRequestBodyNoFilesLimit 1048576
+SecRequestBodyLimitAction ProcessPartial
+SecRequestBodyJsonDepthLimit 512
+SecArgumentsLimit 2000
+SecResponseBodyAccess Off
+SecPcreMatchLimit 100000
+SecPcreMatchLimitRecursion 100000
+SecTmpDir /tmp/
+SecDataDir /tmp/
+SecArgumentSeparator &
+SecCookieFormat 0
+SecStatusEngine Off
+# Uma linha JSON por transação com regra disparada: o painel conta, o fail2ban bane.
+SecAuditEngine RelevantOnly
+SecAuditLogRelevantStatus "^(?:5|4(?!04))"
+SecAuditLogParts ABHZ
+SecAuditLogFormat JSON
+SecAuditLogType Serial
+SecAuditLog %(audit)s
+"""
+
+
+def waf_root(name):
+    version = WAF_SOURCES[name][0]
+    return os.path.join(MODSEC_DIR, "%s-%s" % (name, version))
+
+
+def fetch_verified(url, sha256, dest_dir):
+    """Baixa, confere o SHA-256 e extrai um .tar.gz sem deixar sair da pasta."""
+    import tarfile
+    import tempfile
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "olsbridge"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = resp.read()
+    got = hashlib.sha256(data).hexdigest()
+    if got != sha256:
+        raise RuntimeError("SHA-256 diferente para %s: %s" % (url, got))
+    tmp = tempfile.mkdtemp(dir=MODSEC_DIR)
+    try:
+        path = os.path.join(tmp, "a.tar.gz")
+        with open(path, "wb") as handle:
+            handle.write(data)
+        with tarfile.open(path) as tar:
+            members = []
+            for member in tar.getmembers():
+                target = os.path.realpath(os.path.join(tmp, "x", member.name))
+                if not target.startswith(os.path.realpath(os.path.join(tmp, "x")) + os.sep) or \
+                        member.issym() or member.islnk() or member.isdev():
+                    continue
+                members.append(member)
+            tar.extractall(os.path.join(tmp, "x"), members=members)
+        tops = os.listdir(os.path.join(tmp, "x"))
+        if len(tops) != 1:
+            raise RuntimeError("arquivo inesperado: %s" % url)
+        os.rename(os.path.join(tmp, "x", tops[0]), dest_dir)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def waf_install():
+    """Biblioteca do ModSecurity (apt) e as regras, uma vez por versão."""
+    so = os.path.join(LSWS, "modules", "mod_security.so")
+    if not os.path.exists(so):
+        raise RuntimeError("este OpenLiteSpeed não tem o mod_security")
+    code, out = run(["ldd", so])
+    if "not found" in out:
+        if not shutil.which("apt-get"):
+            raise RuntimeError("falta a libmodsecurity: " + out)
+        env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
+        for package in ("libmodsecurity3t64", "libmodsecurity3"):
+            code, out = run(["apt-get", "install", "-y", "-q", package], env=env)
+            if code == 0:
+                break
+        code, out = run(["ldd", so])
+        if "not found" in out:
+            raise RuntimeError("a libmodsecurity não ficou disponível:\n" + out)
+    os.makedirs(MODSEC_DIR, exist_ok=True)
+    os.chmod(MODSEC_DIR, 0o755)
+    for name, (version, url, sha) in WAF_SOURCES.items():
+        root = waf_root(name)
+        if not os.path.isdir(root):
+            fetch_verified(url, sha, root)
+    setup = os.path.join(waf_root("crs"), "crs-setup.conf")
+    if not os.path.exists(setup):
+        shutil.copyfile(setup + ".example", setup)
+
+
+def waf_write(mode):
+    """Configuração do ModSecurity para o modo: detect só registra, block bloqueia."""
+    crs, wpx = waf_root("crs"), waf_root("wordpress")
+    write(os.path.join(MODSEC_DIR, "modsecurity.conf"), MODSEC_BASE % {
+        "engine": "On" if mode == "block" else "DetectionOnly", "audit": MODSEC_AUDIT})
+    # O ModSecurity v3 recusa um Include com curinga que não acha nada: cada arquivo
+    # entra pelo nome, na ordem que o CRS pede.
+    def each(pattern):
+        return ["Include %s" % p for p in sorted(glob.glob(pattern))]
+
+    lines = ["# Gerado por olsbridge.", "Include %s/modsecurity.conf" % MODSEC_DIR,
+             "Include %s/crs-setup.conf" % crs]
+    for stage in ("config", "before"):
+        lines += each("%s/plugins/*-%s.conf" % (wpx, stage))
+        lines += each("%s/plugins/*-%s.conf" % (crs, stage))
+    lines += each("%s/rules/*.conf" % crs)
+    lines += each("%s/plugins/*-after.conf" % wpx) + each("%s/plugins/*-after.conf" % crs)
+    write(os.path.join(MODSEC_DIR, "main.conf"), "\n".join(lines) + "\n")
+
+
+OPTIONS = {
+    "cache": ("on", "off"),
+    "http3": ("on", "off"),
+    "protection": ("off", "standard", "strict"),
+    "waf": ("off", "detect", "block"),
+}
+
+
+def hestia_http3_rule(enable):
+    """HTTP/3 é UDP 443: abre ou fecha no firewall do HestiaCP, com a regra visível no painel."""
+    tool = os.path.join(HESTIA, "bin")
+    if not os.path.exists(os.path.join(tool, "v-list-firewall")):
+        return None
+    import json
+    code, out = run([os.path.join(tool, "v-list-firewall"), "json"])
+    try:
+        rules = json.loads(out) if code == 0 else {}
+    except ValueError:
+        rules = {}
+    mine = [k for k, v in rules.items() if v.get("COMMENT") == "HTTP3"]
+    if enable and not mine:
+        return run([os.path.join(tool, "v-add-firewall-rule"), "ACCEPT", "0.0.0.0/0", "443",
+                    "UDP", "HTTP3"])
+    if not enable:
+        for rule in mine:
+            run([os.path.join(tool, "v-delete-firewall-rule"), rule])
+    return (0, "")
+
+
+F2B_FILTERS = {
+    "olsbridge-limit": r"""[Definition]
+# OpenLiteSpeed fechou conexões de um IP acima do limite por cliente (olsbridge).
+failregex = \[NOTICE\] \[\d+\] \[<HOST>\] [Rr]eached per client (?:soft|hard) connection limit
+ignoreregex =
+""",
+    "olsbridge-wp": r"""[Definition]
+# Login do WordPress bloqueado pelo OpenLiteSpeed: tentativas demais (olsbridge).
+# O OLS registra o cliente como [IP:porta:H2-1#vhost].
+failregex = \[NOTICE\] \[\d+\] \[<HOST>:[^\]]*\] \[WP\] Too many login attempts
+ignoreregex =
+""",
+    "olsbridge-waf": r"""[Definition]
+# Requisições bloqueadas pelo WAF (ModSecurity, modo block): uma linha JSON por transação.
+failregex = "client_ip":"<HOST>".*"http_code":403
+datepattern = {NONE}
+ignoreregex =
+""",
+    "olsbridge-scan": r"""[Definition]
+# Pedidos de arquivos que só um varredor procura, respondidos com 403 ou 404 (olsbridge).
+# O fail2ban tira a data da linha antes de aplicar o padrão.
+failregex = ^<HOST> \S+ \S+ [^"]*"(?:GET|POST|HEAD|PUT|PROPFIND) [^"]*(?:/\.env|/\.git/|/\.aws/|/\.ssh/|/\.svn/|/\.hg/|/\.DS_Store|/\.vscode/|/\.idea/|/wp-config\.php\.(?:bak|old|orig|save|swp|txt|1)|/wp-config\.bak|/phpinfo\.php|/vendor/phpunit/|/actuator/|/backup\.(?:sql|zip|tar\.gz)|/dump\.sql|/database\.sql|/config\.php\.bak|/\.htpasswd)[^"]* HTTP/[0-9.]+" (?:403|404)
+ignoreregex =
+""",
+}
+
+F2B_JAIL = """# Gerado por olsbridge: bloqueios do OpenLiteSpeed escalam para o firewall do HestiaCP.
+[olsbridge-limit]
+enabled  = true
+filter   = olsbridge-limit
+action   = hestia[name=WEB]
+logpath  = %(lsws)s/logs/error.log
+maxretry = 3
+findtime = 600
+bantime  = 3600
+
+[olsbridge-wp]
+enabled  = true
+filter   = olsbridge-wp
+action   = hestia[name=WEB]
+logpath  = %(lsws)s/logs/error.log
+maxretry = 2
+findtime = 3600
+bantime  = 3600
+
+%(waf)s[olsbridge-scan]
+enabled  = true
+filter   = olsbridge-scan
+action   = hestia[name=WEB]
+logpath  = %(logs)s
+maxretry = 3
+findtime = 600
+bantime  = 3600
+"""
+
+
+def apply_fail2ban(settings):
+    """Liga os jails do olsbridge quando há proteção, fail2ban e a ação do HestiaCP."""
+    base = "/etc/fail2ban"
+    jail = os.path.join(base, "jail.d", "olsbridge.conf")
+    if not os.path.exists(os.path.join(base, "action.d", "hestia.conf")) or \
+            not shutil.which("fail2ban-client"):
+        return False
+    want = settings.get("protection", "standard") != "off" and \
+        os.path.exists(os.path.join(SYSTEMD, "olsbridge.service"))
+    logs = "/var/log/apache2/domains/*.log" if os.path.isdir("/var/log/apache2/domains") \
+        else "/var/log/httpd/domains/*.log"
+    if want:
+        for name, body in F2B_FILTERS.items():
+            write(os.path.join(base, "filter.d", name + ".conf"), body)
+        waf = ""
+        if settings.get("waf") == "block":
+            waf = ("[olsbridge-waf]\nenabled  = true\nfilter   = olsbridge-waf\n"
+                   "action   = hestia[name=WEB]\nlogpath  = %s\nmaxretry = 5\n"
+                   "findtime = 600\nbantime  = 3600\n\n" % MODSEC_AUDIT)
+        text = F2B_JAIL % {"lsws": LSWS, "logs": logs, "waf": waf}
+        old = None
+        if os.path.exists(jail):
+            with open(jail, encoding="utf-8") as handle:
+                old = handle.read()
+        if old == text:
+            return True
+        write(jail, text)
+    elif os.path.exists(jail):
+        os.remove(jail)
+        for name in F2B_FILTERS:
+            path = os.path.join(base, "filter.d", name + ".conf")
+            if os.path.exists(path):
+                os.remove(path)
+    else:
+        return False
+    run(["fail2ban-client", "reload"])
+    return True
+
+
+def read_rtreport(pattern="/tmp/lshttpd/.rtreport*"):
+    """Soma os relatórios de cada processo do OLS; HTTP e HTTPS de um domínio juntos."""
+    total = {"uptime": "", "conns": 0, "ssl_conns": 0, "idle_conns": 0, "bps_in": 0,
+             "bps_out": 0, "req_per_sec": 0.0, "req_processing": 0, "total_reqs": 0,
+             "cache_hits_per_sec": 0.0, "total_cache_hits": 0, "static_per_sec": 0.0}
+    sites, apps, blocked = {}, {}, set()
+
+    def numbers(text):
+        found = {}
+        for key, value in re.findall(r"([A-Z_]+): ([0-9.]+)", text):
+            found[key] = float(value)
+        return found
+
+    for path in sorted(glob.glob(pattern)):
+        if not re.search(r"\.rtreport(\.\d+)?$", path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                lines = handle.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            if line.startswith("UPTIME:") and not total["uptime"]:
+                total["uptime"] = line.split(":", 1)[1].strip()
+            elif line.startswith("BPS_IN"):
+                n = numbers(line)
+                total["bps_in"] += n.get("BPS_IN", 0) + n.get("SSL_BPS_IN", 0)
+                total["bps_out"] += n.get("BPS_OUT", 0) + n.get("SSL_BPS_OUT", 0)
+            elif line.startswith("MAXCONN"):
+                n = numbers(line)
+                total["conns"] += int(n.get("PLAINCONN", 0))
+                total["ssl_conns"] += int(n.get("SSLCONN", 0))
+                total["idle_conns"] += int(n.get("IDLECONN", 0))
+            elif line.startswith("REQ_RATE ["):
+                name = line[len("REQ_RATE ["):line.index("]")]
+                n = numbers(line[line.index("]"):])
+                if not name:
+                    total["req_per_sec"] += n.get("REQ_PER_SEC", 0)
+                    total["req_processing"] += int(n.get("REQ_PROCESSING", 0))
+                    total["total_reqs"] += int(n.get("TOT_REQS", 0))
+                    total["cache_hits_per_sec"] += n.get("PUB_CACHE_HITS_PER_SEC", 0) + \
+                        n.get("PRIVATE_CACHE_HITS_PER_SEC", 0)
+                    total["total_cache_hits"] += int(n.get("TOTAL_PUB_CACHE_HITS", 0) +
+                                                     n.get("TOTAL_PRIVATE_CACHE_HITS", 0))
+                    total["static_per_sec"] += n.get("STATIC_HITS_PER_SEC", 0)
+                    continue
+                domain = re.sub(r"-ssl$", "", name)
+                site = sites.setdefault(domain, {"domain": domain, "req_per_sec": 0.0,
+                                                 "total_reqs": 0, "cache_hits": 0,
+                                                 "processing": 0})
+                site["req_per_sec"] += n.get("REQ_PER_SEC", 0)
+                site["total_reqs"] += int(n.get("TOT_REQS", 0))
+                site["processing"] += int(n.get("REQ_PROCESSING", 0))
+                site["cache_hits"] += int(n.get("TOTAL_PUB_CACHE_HITS", 0) +
+                                          n.get("TOTAL_PRIVATE_CACHE_HITS", 0))
+            elif line.startswith("EXTAPP ["):
+                parts = re.findall(r"\[([^\]]*)\]", line.split(":", 1)[0])
+                name = parts[-1] if parts else "?"
+                n = numbers(line.split(":", 1)[1])
+                app = apps.setdefault(name, {"name": name, "in_use": 0, "idle": 0,
+                                             "waiting": 0, "req_per_sec": 0.0, "total_reqs": 0})
+                app["in_use"] += int(n.get("INUSE_CONN", 0))
+                app["idle"] += int(n.get("IDLE_CONN", 0))
+                app["waiting"] += int(n.get("WAITQUE_DEPTH", 0))
+                app["req_per_sec"] += n.get("REQ_PER_SEC", 0)
+                app["total_reqs"] += int(n.get("TOT_REQS", 0))
+            elif line.startswith("BLOCKED_IP:"):
+                blocked.update(ip.strip() for ip in line.split(":", 1)[1].split(",")
+                               if ip.strip())
+    total["cache_ratio"] = round(100.0 * total["total_cache_hits"] / total["total_reqs"], 1) \
+        if total["total_reqs"] else 0.0
+    for value in list(total):
+        if isinstance(total[value], float):
+            total[value] = round(total[value], 1)
+    for site in sites.values():
+        site["req_per_sec"] = round(site["req_per_sec"], 1)
+    return total, sorted(sites.values(), key=lambda s: -s["total_reqs"]), \
+        sorted(apps.values(), key=lambda a: a["name"]), sorted(blocked)
+
+
+def waf_events(hours=24, limit=4 * 1024 * 1024):
+    """Ataques no log de auditoria do WAF: total recente, regras e IPs mais frequentes."""
+    import json
+    events, rules, ips = 0, {}, {}
+    try:
+        with open(MODSEC_AUDIT, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - limit))
+            data = handle.read().decode("utf-8", "replace")
+    except OSError:
+        return {"events": 0, "blocked": 0, "rules": [], "ips": []}
+    cutoff = time.time() - hours * 3600
+    blocked = 0
+    for line in data.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            tx = json.loads(line).get("transaction", {})
+        except ValueError:
+            continue
+        stamp = tx.get("time_stamp", "")
+        try:
+            when = time.mktime(time.strptime(stamp, "%a %b %d %H:%M:%S %Y"))
+        except ValueError:
+            when = time.time()
+        if when < cutoff:
+            continue
+        events += 1
+        if tx.get("response", {}).get("http_code") == 403:
+            blocked += 1
+        ip = tx.get("client_ip", "?")
+        ips[ip] = ips.get(ip, 0) + 1
+        for message in tx.get("messages", []):
+            rule = message.get("details", {}).get("ruleId", "")
+            if rule and not rule.startswith("949") and not rule.startswith("980"):
+                key = "%s %s" % (rule, message.get("message", "")[:60])
+                rules[key] = rules.get(key, 0) + 1
+    top = lambda d: [{"name": k, "count": v} for k, v in
+                     sorted(d.items(), key=lambda kv: -kv[1])[:8]]
+    return {"events": events, "blocked": blocked, "rules": top(rules), "ips": top(ips)}
+
+
+def firewall_bans():
+    """IPs banidos no firewall do HestiaCP (fail2ban e manuais), com a cadeia."""
+    import json
+    tool = os.path.join(HESTIA, "bin", "v-list-firewall-ban")
+    if not os.path.exists(tool):
+        return []
+    code, out = run([tool, "json"])
+    try:
+        data = json.loads(out) if code == 0 else {}
+    except ValueError:
+        return []
+    bans = [{"ip": ip, "chain": v.get("CHAIN", ""), "date": "%s %s" % (v.get("DATE", ""),
+                                                                    v.get("TIME", ""))}
+            for ip, v in (data.items() if isinstance(data, dict) else [])]
+    return sorted(bans, key=lambda b: b["date"], reverse=True)
+
+
+def cmd_stats(as_json=True):
+    import json
+    total, sites, apps, blocked = read_rtreport()
+    stats = {"total": total, "sites": sites, "php": apps, "ols_blocked": blocked,
+             "firewall_bans": firewall_bans(), "waf": waf_events(), "time": int(time.time())}
+    print(json.dumps(stats, indent=1))
+    return 0
+
+
+def cmd_set(settings, key, value):
+    if key not in OPTIONS or value not in OPTIONS[key]:
+        print("opções: %s" % "; ".join("%s=%s" % (k, "|".join(v)) for k, v in OPTIONS.items()))
+        return 2
+    if key == "waf" and value != "off" and not os.path.exists(
+            os.path.join(LSWS, "modules", "mod_security.so")):
+        print("WAF indisponível: este OpenLiteSpeed não tem o mod_security.")
+        return 1
+    if key == "waf" and value != "off":
+        try:
+            waf_install()
+        except (RuntimeError, OSError) as err:
+            print("WAF: %s" % err)
+            return 1
+    if key == "http3":
+        result = hestia_http3_rule(value == "on")
+        if result and result[0] != 0:
+            print("não foi possível abrir UDP 443 no firewall:\n" + result[1])
+            return 1
+    settings[key] = value
+    settings.save()
+    if key in ("protection", "waf"):
+        apply_fail2ban(settings)
+    if ols_pid():
+        return cmd_reload(settings)
+    generate(settings)
+    return 0
 
 
 HESTIA = "/usr/local/hestia"
@@ -1829,6 +2413,8 @@ HESTIA_FILES = [
     "bin/v-change-sys-web-litespeed",
     "bin/v-restart-sys-litespeed",
     "bin/v-restart-sys-litespeed-php",
+    "bin/v-change-sys-litespeed-option",
+    "bin/v-list-sys-litespeed-stats",
     "web/edit/server/litespeed/index.php",
     "web/templates/pages/edit_server_litespeed.php",
 ]
@@ -2361,6 +2947,7 @@ def cmd_install(settings, mode, offset):
         # Os serviços do painel ficam ativos, como o painel espera.
         code, out = systemctl("start", *units)
     systemctl("enable", "--now", "olsbridge-sync.timer")
+    apply_fail2ban(settings)
     print("Instalado no modo %s. Avisos em %s/warnings.txt." % (mode, OUT))
     return 0 if code == 0 else 1
 
@@ -2380,6 +2967,7 @@ def cmd_uninstall(settings):
         if os.path.exists(path):
             os.remove(path)
     systemctl("daemon-reload")
+    apply_fail2ban(settings)
     if units:
         code, out = systemctl("restart", *units)
         print("%s %s." % (", ".join(units), "de volta" if code == 0 else "não subiram:\n" + out))
@@ -2450,6 +3038,10 @@ def main(argv=None):
         sub.add_parser(name)
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
+    sub.add_parser("stats", help="tempo real, bloqueios e WAF, em JSON")
+    setter = sub.add_parser("set", help="cache, http3, protection, waf")
+    setter.add_argument("key")
+    setter.add_argument("value")
     hestia = sub.add_parser("hestia-integrate", help="página e atalho no painel do HestiaCP")
     hestia.add_argument("--remove", action="store_true")
     unit = sub.add_parser("unit-reload")
@@ -2464,7 +3056,7 @@ def main(argv=None):
     compare.add_argument("--offset", type=int)
     args = parser.parse_args(argv)
     settings = Settings.load()
-    if args.command not in ("status", "hestia-integrate") and not settings.get("apache_conf"):
+    if args.command not in ("status", "hestia-integrate", "stats") and             not settings.get("apache_conf"):
         print("Configuração do Apache não encontrada.")
         return 1
     if args.command == "generate":
@@ -2495,6 +3087,10 @@ def main(argv=None):
         return cmd_status(settings, args.json)
     if args.command == "hestia-integrate":
         return hestia_integrate(args.remove)
+    if args.command == "set":
+        return cmd_set(settings, args.key, args.value)
+    if args.command == "stats":
+        return cmd_stats()
     if args.command == "check":
         return cmd_check(settings)
     if args.command == "compare":

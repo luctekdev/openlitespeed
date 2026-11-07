@@ -1,0 +1,53 @@
+#!/bin/bash
+# info: OpenLiteSpeed live statistics (olsbridge)
+# options: [FORMAT]
+# labels: hestia web
+#
+# example: v-list-sys-litespeed-stats json
+#
+# Requests per second, connections, cache hits, PHP queues per pool, IPs blocked by
+# OpenLiteSpeed and the firewall, and the WAF events of the last 24 hours.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+format=${1-json}
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+if [ ! -x "$OLSBRIDGE" ]; then
+	echo "Error: olsbridge is not installed"
+	exit "$E_NOTEXIST"
+fi
+
+json=$("$OLSBRIDGE" stats 2> /dev/null)
+case $format in
+	json) echo "$json" ;;
+	*)
+		echo "$json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+t = d["total"]
+print("UPTIME:      %s" % t["uptime"])
+print("REQ/S:       %s (cache hits %s/s, %s%% of all requests)" % (t["req_per_sec"], t["cache_hits_per_sec"], t["cache_ratio"]))
+print("CONNECTIONS: %s https, %s http" % (t["ssl_conns"], t["conns"]))
+print("BLOCKED:     %d by OpenLiteSpeed, %d in the firewall" % (len(d["ols_blocked"]), len(d["firewall_bans"])))
+print("WAF 24h:     %d events, %d blocked" % (d["waf"]["events"], d["waf"]["blocked"]))
+'
+		;;
+esac
+
+exit

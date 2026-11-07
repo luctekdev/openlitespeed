@@ -1,0 +1,68 @@
+#!/bin/bash
+# info: change an OpenLiteSpeed option (olsbridge)
+# options: OPTION VALUE
+# labels: hestia web
+#
+# example: v-change-sys-litespeed-option protection strict
+#
+# OPTION and VALUE:
+#   cache       on | off               LSCache for the applications that ask for it
+#   http3       on | off               HTTP/3 (QUIC); opens or closes UDP 443 in the firewall
+#   protection  off | standard | strict  per-IP limits, reCAPTCHA under attack,
+#                                      WordPress login lockout, fail2ban jails
+#   waf         off | detect | block   ModSecurity with the OWASP Core Rule Set
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+option=$1
+value=$2
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+check_args '2' "$#" 'OPTION VALUE'
+case "$option:$value" in
+	cache:on | cache:off | http3:on | http3:off) ;;
+	protection:off | protection:standard | protection:strict) ;;
+	waf:off | waf:detect | waf:block) ;;
+	*) check_result "$E_INVALID" "invalid option or value: $option $value" ;;
+esac
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+# Perform verification if read-only mode is enabled
+check_hestia_demo_mode
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+output=$("$OLSBRIDGE" set "$option" "$value" 2>&1)
+result=$?
+echo "$output"
+if [ "$result" -ne 0 ]; then
+	check_result "$E_RESTART" "OpenLiteSpeed: $option $value failed"
+fi
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+$BIN/v-log-action "system" "Info" "Web" "OpenLiteSpeed option changed: $option $value."
+log_event "$OK" "$ARGUMENTS"
+
+exit

@@ -3,7 +3,18 @@ cmake_minimum_required(VERSION 3.0...3.23)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=gnu++17 -Wall")
 
-include_directories(${PROJECT_SOURCE_DIR}/../third-party/ModSecurity/headers/)
+# MODSEC_SYSTEM links the distribution's shared libmodsecurity (libmodsecurity-dev),
+# which gets security updates from the system package manager. The default builds
+# against the static library from litespeedtech/third-party.
+option(MODSEC_SYSTEM "Link the system's shared libmodsecurity" OFF)
+
+if(MODSEC_SYSTEM)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(MODSEC REQUIRED modsecurity)
+    include_directories(${MODSEC_INCLUDE_DIRS})
+else()
+    include_directories(${PROJECT_SOURCE_DIR}/../third-party/ModSecurity/headers/)
+endif()
 
 execute_process( COMMAND getconf LFS_CFLAGS
             OUTPUT_VARIABLE  LFS_CFLAGS )
@@ -29,6 +40,10 @@ add_library(mod_security SHARED
 )
 
 
+if(MODSEC_SYSTEM)
+    target_link_directories(mod_security PRIVATE ${MODSEC_LIBRARY_DIRS})
+    target_link_libraries(mod_security ${MODSEC_LIBRARIES})
+else()
 # FreeBSD's C++ runtime is libc++; libstdc++ does not exist there.
 if(${CMAKE_HOST_SYSTEM_NAME} STREQUAL "FreeBSD")
   set(STDCXX libc++.a)
@@ -40,5 +55,6 @@ target_link_libraries(mod_security libmodsecurity.a
     -nodefaultlibs ${STDCXX}
     pthread rt -llmdb -lxml2 -lcurl -lssl -lcrypto -lz -lpcre -lyajl
     ${LIBSAN} crypt m gcc_eh c c_nonshared gcc)
+endif()
 
 set_target_properties(mod_security PROPERTIES PREFIX "")

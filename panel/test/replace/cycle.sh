@@ -66,18 +66,14 @@ wait
 slow=$((slow + $(awk '$1 > 3' /tmp/times | wc -l)))
 expect "requisições lentas com pool de 2 filhos (60)" 0 "$slow"
 
-systemctl reload nginx && systemctl restart apache2 && sleep 1
-expect "depois de reload do nginx e restart do Apache" 200 "$(code /info.php)"
-systemctl restart olsbridge && sleep 2
-expect "depois de reiniciar o OLS (boot)" 200 "$(code /info.php)"
-systemctl stop nginx && sleep 1
-expect "stop do nginx não derruba o site" 200 "$(code /who.txt)"
-systemctl start nginx
-
-/usr/local/lsws/bin/olsbridge uninstall
+# Proteções. O cliente aqui é o próprio container: nenhum proxy confiável, então os
+# limites valem para ele.
+/usr/local/lsws/bin/olsbridge set waf block >/dev/null || fail "set waf block"
 sleep 2
-expect "desinstalado: servidor em :80" nginx "$(server | cut -d/ -f1)"
-expect "PHP de volta ao PHP-FPM" fpm-fcgi "$(get /info.php | cut -d' ' -f1)"
-expect "processo do nginx" sim "$(running nginx)"
-expect "processo do PHP-FPM" sim "$(running php-fpm8.4)"
-exit $status
+expect "WAF: SQL injection bloqueada" 403 "$(code "/who.txt?id=1%27%20OR%201=1--")"
+expect "WAF: página normal" 200 "$(code /who.txt?pagina=2)"
+expect "WAF: PHP normal" 200 "$(code /t.php)"
+/usr/local/lsws/bin/olsbridge set waf off >/dev/null
+# O limite por IP é testado de outro container: o OLS libera os IPs locais (run.sh).
+
+echo "$status" > /tmp/olsb-status
