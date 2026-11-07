@@ -259,6 +259,11 @@ CASES = [
          htaccess=("SetEnv A one\nSetEnv B two\nUnsetEnv B\n"
                    "Header set X-A \"%{A}e\"\nHeader set X-B \"set\" env=B\n"),
          requests=[get("page.txt")]),
+    dict(name="env-condition-empty", group="mod_headers",
+         htaccess=("SetEnv EMPTY \"\"\n"
+                   "Header set X-Has \"yes\" env=EMPTY\n"
+                   "Header set X-Not \"yes\" env=!EMPTY\n"),
+         requests=[get("page.txt")]),
     dict(name="html5-boilerplate", group="aplicações reais",
          htaccess=("<IfModule mod_headers.c>\n"
                    "Header always set X-Content-Type-Options \"nosniff\"\n"

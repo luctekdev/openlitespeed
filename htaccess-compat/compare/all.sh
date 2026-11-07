@@ -32,11 +32,13 @@ socket.create_connection(('$service', 80), timeout=2)" >/dev/null 2>&1; do
 
 compare() {
     runner=$1 report=$2 floor=$3
-    compose run --rm -T "$runner" >/dev/null 2>&1
+    # Sem isto, um comparador que falhe deixa o relatório anterior ser lido como novo.
+    rm -f "report/$report"
+    compose run --rm -T "$runner" >/dev/null 2>&1 || status=1
     now=$(passed "report/$report")
     min=$(passed "$floor")
     echo "$report: $now requisições iguais ao Apache (mínimo: $min)"
-    [ "$now" -ge "$min" ] || status=1
+    [ "${now:-0}" -ge "$min" ] || status=1
 }
 
 compose up -d --force-recreate apache ols ols-policy apache-php ols-php >/dev/null 2>&1

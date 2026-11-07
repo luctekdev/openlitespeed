@@ -263,7 +263,7 @@ usa a mesma árvore. A correção também interessa ao upstream.
 
 | Verificação | Resultado |
 |---|---|
-| Arquivos estáticos | 98 de 99 requisições iguais ao Apache (OLS original: 31 de 62, num corpus menor) |
+| Arquivos estáticos | 99 de 100 requisições iguais ao Apache (OLS original: 31 de 62, num corpus menor) |
 | PHP | 21 de 21 iguais ao Apache com mod_php |
 | Recarregamento | Todos os cenários, sob carga e sem erros |
 | Política | 33 de 33 |
@@ -319,5 +319,7 @@ cliente `ab` pode ser o limite nesse patamar, então isso não prova ausência d
 - Corpus maior, com arquivos `.htaccess` reais completos de plugins e aplicações.
 - Teste em servidor real, com tráfego real, antes de usar em produção.
 - A sincronização com o upstream só foi exercitada sem versão nova: o caminho de merge, PR e conflito ainda não rodou.
-- Enviar à LiteSpeed as correções que valem para todos: vazamento de contextos, `env=` ignorado em `Header` e
-  regras de `Files` puladas pelo cache de URL.
+- Acompanhar o que foi enviado à LiteSpeed em 2026-11-07: o `env=` ignorado em `Header` está na
+  [PR 548](https://github.com/litespeedtech/openlitespeed/pull/548), e o vazamento de contextos foi relatado em privado.
+  Regras de `Files` puladas pelo cache de URL não foram enviadas: sem o suporte a `.htaccess` deste fork, o OLS só tem
+  regras de `Files` que negam tudo ou forçam o tipo, então um arquivo bloqueado nunca entra no cache.

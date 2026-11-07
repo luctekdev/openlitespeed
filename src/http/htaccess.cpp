@@ -2284,8 +2284,7 @@ static bool netMatches(const HtaAddr &addr, const unsigned char *pPeer)
 static bool hasEnv(HttpSession *pSession, const std::string &name)
 {
     int len = 0;
-    const char *pValue = pSession->getReq()->getEnv(name.c_str(), name.size(), len);
-    return pValue && len > 0;
+    return pSession->getReq()->getEnv(name.c_str(), name.size(), len) != NULL;
 }
 
 

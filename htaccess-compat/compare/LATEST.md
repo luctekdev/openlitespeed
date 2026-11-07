@@ -1,6 +1,6 @@
 # Matriz de compatibilidade Apache x OLS
 
-Requisições idênticas: **98 de 99**.
+Requisições idênticas: **99 de 100**.
 
 | Grupo | Iguais | Total |
 |---|---|---|
@@ -14,7 +14,7 @@ Requisições idênticas: **98 de 99**.
 | mod_dir | 1 | 1 |
 | mod_env | 2 | 2 |
 | mod_expires | 2 | 2 |
-| mod_headers | 8 | 8 |
+| mod_headers | 9 | 9 |
 | mod_mime | 1 | 1 |
 | mod_rewrite | 10 | 10 |
 | mod_setenvif | 2 | 2 |

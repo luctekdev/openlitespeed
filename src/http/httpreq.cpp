@@ -4768,12 +4768,12 @@ int HttpReq::applyOps(HttpSession * pSession,
             continue;
         if (iter->getEnv())
         {
+            //env=VAR applies when VAR exists, env=!VAR when it does not.
             const char *pName = iter->getEnv()->c_str();
             int nameLen = iter->getEnv()->len();
             int negate = (*pName == '!');
             int valLen = 0;
-            const char *pVal = getEnv(pName + negate, nameLen - negate, valLen);
-            if ((pVal && valLen > 0) == negate)
+            if ((getEnv(pName + negate, nameLen - negate, valLen) != NULL) == negate)
                 continue;
         }
         applyOp(pSession, pRespHeader, iter);
