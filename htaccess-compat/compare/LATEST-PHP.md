@@ -1,11 +1,11 @@
 # Matriz de compatibilidade Apache x OLS
 
-Requisições idênticas: **21 de 21**.
+Requisições idênticas: **24 de 24**.
 
 | Grupo | Iguais | Total |
 |---|---|---|
 | ambiente | 3 | 3 |
-| aplicações reais | 2 | 2 |
+| aplicações reais | 5 | 5 |
 | core | 1 | 1 |
 | handlers | 6 | 6 |
 | mod_headers | 3 | 3 |
