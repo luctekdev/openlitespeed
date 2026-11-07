@@ -68,12 +68,31 @@ expect "requisições lentas com pool de 2 filhos (60)" 0 "$slow"
 
 # Proteções. O cliente aqui é o próprio container: nenhum proxy confiável, então os
 # limites valem para ele.
-/usr/local/lsws/bin/olsbridge set waf block >/dev/null || fail "set waf block"
+out=$(/usr/local/lsws/bin/olsbridge set waf block 2>&1) || fail "set waf block: $out"
 sleep 2
 expect "WAF: SQL injection bloqueada" 403 "$(code "/who.txt?id=1%27%20OR%201=1--")"
 expect "WAF: página normal" 200 "$(code /who.txt?pagina=2)"
 expect "WAF: PHP normal" 200 "$(code /t.php)"
 /usr/local/lsws/bin/olsbridge set waf off >/dev/null
+
+# WebP: a cópia é feita com o dono da imagem e sai só para quem aceita.
+python3 -c "
+import struct, zlib, random
+w = h = 256
+raw = b''.join(b'\0' + bytes(random.randrange(256) // 32 * 32 for _ in range(w * 3)) for _ in range(h))
+def chunk(t, d): return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d))
+png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(raw, 9)) + chunk(b'IEND', b'')
+open('/home/alice/web/alpha.test/public_html/foto.png', 'wb').write(png)
+"
+chown alice:alice /home/alice/web/alpha.test/public_html/foto.png
+/usr/local/lsws/bin/olsbridge webp >/dev/null 2>&1
+expect "WebP: cópia com o dono da imagem" alice \
+    "$(stat -c %U /home/alice/web/alpha.test/public_html/foto.png.webp 2>/dev/null)"
+ctype() { curl -s -o /dev/null -w '%{content_type}' -H "Host: alpha.test" -H "Accept: $1" "http://$IP/foto.png"; }
+expect "WebP: navegador que aceita" image/webp "$(ctype 'image/webp,*/*')"
+expect "WebP: navegador que não aceita" image/png "$(ctype 'image/png,*/*')"
+expect "WebP: HTML sem cache longo" "" "$(curl -s -o /dev/null -D - -H "Host: alpha.test" "http://$IP/t.php" |
+    grep -i '^cache-control: .*max-age=315360000')"
 # O limite por IP é testado de outro container: o OLS libera os IPs locais (run.sh).
 
 echo "$status" > /tmp/olsb-status

@@ -30,10 +30,22 @@ docker exec "$name" /usr/local/lsws/bin/olsbridge set protection strict >/dev/nu
 sleep 2
 docker run -d --name "$client" --entrypoint sleep olsbridge-replace 300 >/dev/null
 expect "outro IP antes do ataque" 200 "$(get_code "$client")"
-# 250 conexões ao mesmo tempo, acima do limite de 200 por IP do nível strict.
-docker exec "$client" h2load -t 2 -c 250 -n 2500 --h1 "http://$SIP/who.txt" \
-    -H "Host: alpha.test" >/dev/null 2>&1
-sleep 1
+# Slowloris: 300 conexões com o cabeçalho pela metade, acima do limite de 200 por IP do
+# nível strict. Uma rajada de requisições completas não serve de teste: acima do limite
+# soft o OLS desliga o keep-alive e fecha cada conexão depois da resposta, e uma conexão
+# sem dados nem chega ao OLS (deferred accept).
+docker exec "$client" python3 -c "
+import socket, time
+socks = []
+for i in range(300):
+    try:
+        s = socket.create_connection(('$SIP', 80), timeout=3)
+        s.sendall(b'GET /who.txt HTTP/1.1\r\nHost: alpha.test\r\n')
+        socks.append(s)
+    except OSError:
+        break
+time.sleep(3)
+"
 docker exec "$name" grep -q "Reached per client hard connection limit" \
     /usr/local/lsws/logs/error.log && ok "limite por IP registrado no error.log" \
     || fail "limite por IP não registrado"

@@ -2081,7 +2081,7 @@ def waf_install():
             raise RuntimeError("falta a libmodsecurity: " + out)
         env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
         for package in ("libmodsecurity3t64", "libmodsecurity3"):
-            code, out = run(["apt-get", "install", "-y", "-q", package], env=env)
+            code, out = run(APT_INSTALL + [package], env=env)
             if code == 0:
                 break
         code, out = run(["ldd", so])
@@ -2117,6 +2117,10 @@ def waf_write(mode):
     lines += each("%s/plugins/*-after.conf" % wpx) + each("%s/plugins/*-after.conf" % crs)
     write(os.path.join(MODSEC_DIR, "main.conf"), "\n".join(lines) + "\n")
 
+
+# Outro apt (o timer do WebP, uma atualização automática) pode estar com a trava do
+# dpkg: espera em vez de falhar.
+APT_INSTALL = ["apt-get", "-o", "DPkg::Lock::Timeout=300", "install", "-y", "-q"]
 
 WEBP_RULES = [
     # Navegador que aceita WebP e cópia pronta ao lado da imagem. A cópia fica na mesma
@@ -2179,7 +2183,7 @@ def ensure_cwebp():
     if os.path.exists(stamp) and time.time() - os.path.getmtime(stamp) < 86400:
         return None
     open(stamp, "w").close()
-    run(["apt-get", "install", "-y", "-q", "webp"],
+    run(APT_INSTALL + ["webp"],
         env=dict(os.environ, DEBIAN_FRONTEND="noninteractive"))
     return shutil.which("cwebp")
 
@@ -3208,7 +3212,7 @@ def ensure_lsphp(once=False):
         todo.append(version)
     if todo:
         env = dict(os.environ, DEBIAN_FRONTEND="noninteractive")
-        code, out = run(["apt-get", "install", "-y", "-q"] +
+        code, out = run(APT_INSTALL +
                         ["php%s-litespeed" % v for v in todo], env=env)
         print("lsphp %s: %s" % (", ".join(todo), "instalado" if code == 0 else
                                 "falhou\n" + out[-2000:]))
