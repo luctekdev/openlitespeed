@@ -61,6 +61,23 @@ CASES = [
                    "RewriteCond %{REQUEST_FILENAME} !-f\n"
                    "RewriteRule ^ index.html [L]\n</IfModule>\n"),
          requests=[get(""), get("page.txt"), get("users/5"), get("users/5/")]),
+    # O essencial do .htaccess.sample do Magento 2.4 (sem php_value, que no Apache sem
+    # mod_php é erro 500, e sem o PHP do front controller).
+    dict(name="magento", group="aplicações reais",
+         htaccess=("DirectoryIndex index.html\n<IfModule mod_rewrite.c>\n"
+                   "Options -FollowSymLinks +SymLinksIfOwnerMatch\nRewriteEngine on\n"
+                   "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]\n"
+                   "RewriteCond %{REQUEST_FILENAME} !-f\nRewriteCond %{REQUEST_FILENAME} !-d\n"
+                   "RewriteCond %{REQUEST_FILENAME} !-l\nRewriteRule .* index.html [L]\n"
+                   "</IfModule>\nAddDefaultCharset Off\nRedirectMatch 403 /\\.git\n"
+                   "<Files composer.json>\n<IfVersion < 2.4>\norder allow,deny\ndeny from all\n"
+                   "</IfVersion>\n<IfVersion >= 2.4>\nRequire all denied\n</IfVersion>\n</Files>\n"
+                   "<IfModule mod_headers.c>\nHeader set X-UA-Compatible \"IE=edge\"\n"
+                   "<FilesMatch \"\\.(css|js|txt)$\">\nHeader unset X-UA-Compatible\n"
+                   "</FilesMatch>\n</IfModule>\n"),
+         files={"composer.json": "{}\n", ".git/config": "[core]\n", "style.css": "body{}\n"},
+         requests=[get(""), get("catalog/product/1"), get("composer.json"), get(".git/config"),
+                   get("style.css"), get("page.txt")]),
 
     # --- mod_headers ---
     dict(name="header-set", group="mod_headers",
@@ -252,6 +269,15 @@ CASES = [
     dict(name="redirect-querystring", group="mod_alias",
          htaccess="Redirect 301 {base}/old {base}/new\n",
          requests=[get("old?x=1")]),
+    # Status fora de 3xx não leva URL: o Apache responde o status (Magento: RedirectMatch 403 /\.git).
+    dict(name="redirect-status", group="mod_alias",
+         htaccess=("RedirectMatch 403 {base}/\\.git\nRedirect 404 {base}/hidden\n"
+                   "Redirect 410 {base}/gone2\n"),
+         files={".git/HEAD": "ref: refs/heads/main\n", "hidden/a.txt": "a\n"},
+         requests=[get(".git/HEAD"), get("hidden/a.txt"), get("gone2"), get("page.txt")]),
+    dict(name="addtype-charset", group="mod_mime",
+         htaccess="AddDefaultCharset Off\nAddType 'text/html; charset=UTF-8' html\n",
+         requests=[get("index.html")]),
     dict(name="redirect-permanent", group="mod_alias",
          htaccess="RedirectPermanent {base}/old {base}/new\nRedirectTemp {base}/tmp {base}/t\n",
          requests=[get("old"), get("tmp")]),

@@ -1242,9 +1242,11 @@ static bool addRedirect(const HtaBuild &b, const HtaDirective &dir,
     if (i >= args.size())
         return false;
     redirect.m_sPath = args[i++];
+    //Apache: a status outside 3xx takes no URL and is answered as is
+    //(`RedirectMatch 403 /\.git` in Magento's .htaccess.sample).
     if (i < args.size())
         redirect.m_sTarget = args[i];
-    else if (redirect.m_iStatus != SC_410)
+    else if (redirect.m_iStatus < SC_400)
         return false;
     if (regex)
     {

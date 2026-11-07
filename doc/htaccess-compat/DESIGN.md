@@ -296,6 +296,8 @@ cliente `ab` pode ser o limite nesse patamar, então isso não prova ausência d
 | `AuthType Digest`, `Require expr` | Sem suporte: o acesso é negado ou responde 500 |
 | `<If>` | Só `Require`, `Header`, `SetEnv*`, `BrowserMatch*` e `Redirect*`, com subconjunto das expressões |
 | `AddHandler` | Só tipos PHP |
+| `AddType` com parâmetro (`'text/html; charset=UTF-8'`) | O tipo vale, o `charset` não: a resposta sai `text/html`. O navegador usa o `<meta charset>` da página |
+| `php_value` com PHP-FPM | Só chega ao PHP pelo lsphp (LSAPI). Com o OLS usando sockets do PHP-FPM, é ignorado; o Apache sem mod_php responde 500 |
 | `Options` | Só `Indexes`. `FollowSymLinks`, `MultiViews` e `ExecCGI` são ignorados |
 | `AddOutputFilter*`, `Deflate*` | Ignorados, pois o OLS comprime por conta própria |
 | Contexto configurado abaixo de um `.htaccess` | Não herda esse `.htaccess` |
