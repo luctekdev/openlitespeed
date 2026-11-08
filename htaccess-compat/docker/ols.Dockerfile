@@ -41,14 +41,33 @@ RUN git config core.symlinks true \
 ENV CUR_PATH=/work/openlitespeed
 RUN ./build.sh -o OFF -l OFF -p OFF && test -x build/src/openlitespeed
 
-# WAF: o módulo do ModSecurity ligado à libmodsecurity do sistema, que o apt atualiza.
-# No servidor, o pacote libmodsecurity3t64 (Ubuntu 24.04 e 26.04) basta.
-RUN apt-get update && apt-get install -y --no-install-recommends libmodsecurity-dev \
-    && cmake -S . -B build-modsec -DCMAKE_BUILD_TYPE=Release -DMOD_SECURITY=ON \
-             -DMODSEC_SYSTEM=ON -DMOD_PAGESPEED=OFF -DMOD_LUA=OFF >/dev/null \
+# WAF: libmodsecurity compilada aqui, a partir do tarball do projeto conferido pelo
+# SHA-256. O Ubuntu parou na 3.0.14 (24.04 e 26.04), sem as correções de segurança da
+# 3.0.15 à 3.0.17: estouros de memória no multipart e no hex_decode (CVE-2026-30923,
+# CVE-2026-42268), desvio do parser multipart (CVE-2026-52747) e desvios das
+# transformações. Fica em /usr/local/lsws/modsec, e o módulo a acha pelo RPATH; as
+# bibliotecas que ela usa (pcre2, libxml2, yajl, curl) são as do pacote
+# libmodsecurity3t64, que a ponte instala ao ligar o WAF.
+ARG MODSEC_VERSION=3.0.17
+ARG MODSEC_SHA256=f283b33d5c21130fd3a15c84a93a1abe12bd1949edaf44288b12af571b671a50
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpcre2-dev libxml2-dev libyajl-dev libcurl4-openssl-dev pkg-config \
+    && curl -fsSL -o /tmp/modsec.tar.gz "https://github.com/owasp-modsecurity/ModSecurity/releases/download/v${MODSEC_VERSION}/modsecurity-v${MODSEC_VERSION}.tar.gz" \
+    && echo "${MODSEC_SHA256}  /tmp/modsec.tar.gz" | sha256sum -c - \
+    && tar xzf /tmp/modsec.tar.gz -C /tmp \
+    && cd "/tmp/modsecurity-v${MODSEC_VERSION}" \
+    && ./configure --prefix=/usr/local/lsws/modsec --with-pcre2 --with-yajl --with-libxml \
+           --without-lua --without-maxmind --without-ssdeep --without-lmdb >/dev/null \
+    && make -j"$(nproc)" >/dev/null && make install >/dev/null \
+    && rm -rf /tmp/modsec.tar.gz "/tmp/modsecurity-v${MODSEC_VERSION}" /usr/local/lsws/modsec/lib/*.a \
+    && cd /work/openlitespeed \
+    && PKG_CONFIG_PATH=/usr/local/lsws/modsec/lib/pkgconfig \
+       cmake -S . -B build-modsec -DCMAKE_BUILD_TYPE=Release -DMOD_SECURITY=ON \
+             -DMODSEC_SYSTEM=ON -DMOD_PAGESPEED=OFF -DMOD_LUA=OFF \
+             -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-rpath,/usr/local/lsws/modsec/lib" >/dev/null \
     && cmake --build build-modsec --target mod_security -j"$(nproc)" \
     && cp build-modsec/src/modules/modsecurity-ls/mod_security.so dist/modules/ \
-    && ldd dist/modules/mod_security.so | grep -q libmodsecurity
+    && ldd dist/modules/mod_security.so | grep -q "/usr/local/lsws/modsec/lib/libmodsecurity"
 
 # Testes do upstream: build Debug (com ASan) a partir do código original, sem as
 # alterações que build.sh faz nos CMakeLists.
