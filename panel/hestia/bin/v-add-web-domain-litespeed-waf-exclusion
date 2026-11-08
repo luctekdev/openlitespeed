@@ -1,0 +1,78 @@
+#!/bin/bash
+# info: let a request pass a WAF rule on one web domain (olsbridge)
+# options: USER DOMAIN RULE [PATH] [NOTE]
+# labels: hestia web
+#
+# example: v-add-web-domain-litespeed-waf-exclusion admin example.com 942100 /api/webhook "Payment webhook"
+#
+# Turns rule RULE (900000 to 999999, except 901xxx, 949xxx, 959xxx and 980xxx) off
+# for the domain and its aliases, on the whole site or only on PATH and below it.
+# NOTE (up to 120 characters) says why. Prints the id of the exclusion and applies it
+# with a graceful restart. Exit codes: 2 invalid value, 4 the same rule and path
+# already exist, 8 more than 50 exclusions on the domain.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+user=$1
+domain=$2
+domain_idn=$2
+rule=$3
+path=$4
+note=$5
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+# shellcheck source=/usr/local/hestia/func/domain.sh
+source $HESTIA/func/domain.sh
+# load config file
+source_conf "$HESTIA/conf/hestia.conf"
+
+# Additional argument formatting
+format_domain
+format_domain_idn
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+check_args '3' "$#" 'USER DOMAIN RULE [PATH] [NOTE]'
+is_format_valid 'user' 'domain'
+is_object_valid 'user' 'USER' "$user"
+is_object_unsuspended 'user' 'USER' "$user"
+is_object_valid 'web' 'DOMAIN' "$domain"
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+# Perform verification if read-only mode is enabled
+check_hestia_demo_mode
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+# The bridge validates RULE, PATH and NOTE and answers with the panel's exit codes.
+output=$("$OLSBRIDGE" waf-site add -- "$domain_idn" "$rule" "$path" "$note" 2>&1)
+result=$?
+if [ "$result" -ne 0 ]; then
+	check_result "$result" "$output"
+fi
+echo "$output"
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+$BIN/v-log-action "$user" "Info" "Web" "WAF rule $rule allowed (Domain: $domain, Path: ${path:-/}, Id: $output)."
+log_event "$OK" "$ARGUMENTS"
+
+exit

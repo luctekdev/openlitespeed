@@ -76,9 +76,38 @@ mkdir -p /etc/nginx/conf.d/domains /var/log/apache2/domains
 printf '%s
 ' "log_format bytes '\$body_bytes_sent';" 'include /etc/nginx/conf.d/domains/*.conf;'     > /etc/nginx/conf.d/domains.conf
 sed -e "s/%ip%/$IP/g" -e "s/%proxy_port%/80/g" -e "s/%web_port%/8080/g" \
-    -e "s/%domain_idn%/alpha.test/g" -e "s/%alias_idn%//g" -e "s/%domain%/alpha.test/g" \
+    -e "s/%domain_idn%/alpha.test/g" -e "s/%alias_idn%/www.alpha.test/g" -e "s/%domain%/alpha.test/g" \
     -e "s|%home%|/home|g" -e "s/%user%/alice/g" -e "s/%web_system%/apache2/g" \
     -e "s|%docroot%|$D/public_html|g" -e "s/%proxy_extensions%/css|js|png|txt/g" \
     /test/fixtures/nginx.tpl > /etc/nginx/conf.d/domains/alpha.test.conf
+sed -i "s/^    ServerName alpha.test$/    ServerName alpha.test\n    ServerAlias www.alpha.test/" \
+    /etc/apache2/sites-enabled/alpha.test.conf
+
+# Um segundo site, só estático, para o WAF por site (waf.sh).
+E=/home/bob/web/beta.test
+id bob >/dev/null 2>&1 || useradd -m -s /bin/bash bob
+mkdir -p $E/public_html
+echo "beta" > $E/public_html/who.txt
+chown -R bob:bob /home/bob
+chmod 711 /home/bob
+cat > /etc/apache2/sites-enabled/beta.test.conf <<EOF
+<VirtualHost $IP:8080>
+    ServerName beta.test
+    DocumentRoot $E/public_html
+    <Directory $E/public_html>
+        AllowOverride All
+        Require all granted
+    </Directory>
+</VirtualHost>
+EOF
+sed -e "s/%ip%/$IP/g" -e "s/%proxy_port%/80/g" -e "s/%web_port%/8080/g" \
+    -e "s/%domain_idn%/beta.test/g" -e "s/%alias_idn%//g" -e "s/%domain%/beta.test/g" \
+    -e "s|%home%|/home|g" -e "s/%user%/bob/g" -e "s/%web_system%/apache2/g" \
+    -e "s|%docroot%|$E/public_html|g" -e "s/%proxy_extensions%/css|js|png|txt/g" \
+    /test/fixtures/nginx.tpl > /etc/nginx/conf.d/domains/beta.test.conf
+
+# Lista de IPs do QUIC.cloud já baixada: sem ela, o OLS a baixa na subida e espera até
+# 10 s se quic.cloud não responder, e o teste dependeria da internet.
+mkdir -p /usr/local/lsws/tmp && touch /usr/local/lsws/tmp/download-quic-cloud-ips
 
 systemctl restart php8.4-fpm apache2 nginx

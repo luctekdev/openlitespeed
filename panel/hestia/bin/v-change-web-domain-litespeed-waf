@@ -1,0 +1,79 @@
+#!/bin/bash
+# info: change the WAF mode of a web domain (olsbridge)
+# options: USER DOMAIN MODE
+# labels: hestia web
+#
+# example: v-change-web-domain-litespeed-waf admin example.com detect
+#
+# MODE is one of:
+#   inherit  the server's mode (v-change-sys-litespeed-option waf ...)
+#   block    the WAF blocks attacks on this domain, even with the server's WAF off
+#   detect   the WAF only records attacks on this domain
+#   off      no WAF on this domain
+# Applies to the domain and its aliases, with a graceful restart.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+user=$1
+domain=$2
+domain_idn=$2
+mode=$3
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+# shellcheck source=/usr/local/hestia/func/domain.sh
+source $HESTIA/func/domain.sh
+# load config file
+source_conf "$HESTIA/conf/hestia.conf"
+
+# Additional argument formatting
+format_domain
+format_domain_idn
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+check_args '3' "$#" 'USER DOMAIN MODE'
+is_format_valid 'user' 'domain'
+case "$mode" in
+	inherit | block | detect | off) ;;
+	*) check_result "$E_INVALID" "invalid mode: $mode (inherit, block, detect or off)" ;;
+esac
+is_object_valid 'user' 'USER' "$user"
+is_object_unsuspended 'user' 'USER' "$user"
+is_object_valid 'web' 'DOMAIN' "$domain"
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+# Perform verification if read-only mode is enabled
+check_hestia_demo_mode
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+output=$("$OLSBRIDGE" waf-site mode -- "$domain_idn" "$mode" 2>&1)
+result=$?
+if [ "$result" -ne 0 ]; then
+	check_result "$result" "$output"
+fi
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+$BIN/v-log-action "$user" "Info" "Web" "WAF mode changed (Domain: $domain, Mode: $mode)."
+log_event "$OK" "$ARGUMENTS"
+
+exit

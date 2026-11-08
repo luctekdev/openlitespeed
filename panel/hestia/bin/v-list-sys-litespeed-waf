@@ -1,0 +1,56 @@
+#!/bin/bash
+# info: WAF events of the whole server (olsbridge)
+# options: [HOURS] [FORMAT]
+# labels: hestia web
+#
+# example: v-list-sys-litespeed-waf 24 json
+#
+# Same as v-list-web-domain-litespeed-waf for every domain, with the domain of each
+# event and the server's events and blocks per hour.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+hours=${1-24}
+format=${2-json}
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+# load config file
+source_conf "$HESTIA/conf/hestia.conf"
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+if ! [[ "$hours" =~ ^[0-9]{1,3}$ ]] || [ "$hours" -lt 1 ] || [ "$hours" -gt 168 ]; then
+	check_result "$E_INVALID" "invalid hours: $hours (1 to 168)"
+fi
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+output=$("$OLSBRIDGE" waf-log --hours "$hours" 2>&1)
+result=$?
+if [ "$result" -ne 0 ]; then
+	check_result "$result" "$output"
+fi
+echo "$output"
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+exit

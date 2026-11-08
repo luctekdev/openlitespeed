@@ -1,0 +1,73 @@
+#!/bin/bash
+# info: WAF events, mode and rule exclusions of a web domain (olsbridge)
+# options: USER DOMAIN [HOURS] [FORMAT]
+# labels: hestia web
+#
+# example: v-list-web-domain-litespeed-waf admin example.com 24 json
+#
+# Requests of the domain (and its aliases) that the WAF flagged or blocked in the
+# last HOURS (default 24, at most 168), newest first, at most 200, with the rules
+# that fired, a summary by rule and by hour, the WAF mode of the domain and its rule
+# exclusions. Never shows request bodies, cookies or Authorization; the matched data
+# is cut to 200 characters with passwords and tokens masked.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+user=$1
+domain=$2
+domain_idn=$2
+hours=${3-24}
+format=${4-json}
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+# shellcheck source=/usr/local/hestia/func/domain.sh
+source $HESTIA/func/domain.sh
+# load config file
+source_conf "$HESTIA/conf/hestia.conf"
+
+# Additional argument formatting
+format_domain
+format_domain_idn
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+check_args '2' "$#" 'USER DOMAIN [HOURS] [FORMAT]'
+is_format_valid 'user' 'domain'
+is_object_valid 'user' 'USER' "$user"
+is_object_valid 'web' 'DOMAIN' "$domain"
+if ! [[ "$hours" =~ ^[0-9]{1,3}$ ]] || [ "$hours" -lt 1 ] || [ "$hours" -gt 168 ]; then
+	check_result "$E_INVALID" "invalid hours: $hours (1 to 168)"
+fi
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+# JSON is the only format: events and rules do not fit a table.
+output=$("$OLSBRIDGE" waf-site show --hours "$hours" -- "$domain_idn" 2>&1)
+result=$?
+if [ "$result" -ne 0 ]; then
+	check_result "$result" "$output"
+fi
+echo "$output"
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+exit

@@ -1166,16 +1166,21 @@ class Generator(object):
         return out + ["}", ""]
 
     def waf_mode(self):
+        """Motor global do ModSecurity, ou None sem WAF. Um site em block ou detect
+        liga o módulo mesmo com o servidor em off (os outros sites ficam de fora)."""
         mode = self.settings.get("waf", "off")
-        if mode == "off":
+        sites = waf_sites_state(self.server, mode, prune=os.geteuid() == 0)
+        wanted = mode != "off" or any(s["effective"] != "off" for s in sites)
+        if not wanted:
             return None
         if not (os.path.exists(os.path.join(LSWS, "modules", "mod_security.so")) and
                 os.path.isdir(waf_root("crs"))):
-            self.warnings.append("WAF %s pedido, mas o mod_security ou as regras faltam: "
-                                 "olsbridge set waf %s" % (mode, mode))
+            self.warnings.append("WAF pedido, mas o mod_security ou as regras faltam: "
+                                 "olsbridge set waf %s" % (mode if mode != "off" else "block"))
             return None
-        waf_write(mode)
-        return mode
+        engine = {"block": "On", "detect": "DetectionOnly"}.get(mode, "DetectionOnly")
+        waf_write(engine, waf_sites_conf(mode, sites))
+        return engine
 
     def protection_conf(self):
         level = PROTECTION.get(self.settings.get("protection", "standard"))
@@ -1886,14 +1891,25 @@ def link_server_conf():
         handle.write(wanted)
 
 
+def is_ols_process(pid):
+    """O PID é de um OLS: um arquivo de PID velho pode apontar para outro processo,
+    que herdou o número (comum em contêiner, com PIDs baixos)."""
+    try:
+        os.kill(pid, 0)
+        exe = os.readlink("/proc/%d/exe" % pid)
+    except OSError:
+        return False
+    return os.path.basename(exe.replace(" (deleted)", "")) in ("openlitespeed", "lshttpd",
+                                                              "litespeed")
+
+
 def ols_pid():
     try:
         with open(PID_FILE) as handle:
             pid = int(handle.read().strip())
-        os.kill(pid, 0)
-        return pid
     except (OSError, ValueError):
         return None
+    return pid if is_ols_process(pid) else None
 
 
 def lswsctrl(action):
@@ -1946,8 +1962,7 @@ def ols_alive():
         return True
     try:
         with open(GRACEFUL_PID) as handle:
-            os.kill(int(handle.read().strip()), 0)
-        return True
+            return is_ols_process(int(handle.read().strip()))
     except (OSError, ValueError):
         return False
 
@@ -2026,9 +2041,9 @@ def current_pid(seconds=10):
     return ols_pid()
 
 
-def cmd_reload(settings, only_if_changed=False):
+def cmd_reload(settings, only_if_changed=False, quiet=False):
     with bridge_lock():
-        changed, _warnings = generate(settings, quiet=only_if_changed)
+        changed, _warnings = generate(settings, quiet=only_if_changed or quiet)
         pid = current_pid()
         if not pid:
             return cmd_start(settings)
@@ -2189,11 +2204,15 @@ def waf_install():
         shutil.copyfile(setup + ".example", setup)
 
 
-def waf_write(mode):
-    """Configuração do ModSecurity para o modo: detect só registra, block bloqueia."""
+def waf_write(engine, sites_conf=""):
+    """Configuração do ModSecurity: engine On bloqueia, DetectionOnly só registra; o
+    modo e as exclusões de cada site vêm em olsbridge-sites.conf, antes do CRS."""
     crs, wpx = waf_root("crs"), waf_root("wordpress")
     write(os.path.join(MODSEC_DIR, "modsecurity.conf"), MODSEC_BASE % {
-        "engine": "On" if mode == "block" else "DetectionOnly", "audit": MODSEC_AUDIT})
+        "engine": engine, "audit": MODSEC_AUDIT})
+    write(os.path.join(MODSEC_DIR, "olsbridge-sites.conf"),
+          "# Gerado por olsbridge a partir de %s/*.json.\n%s" % (WAF_SITES, sites_conf))
+    ensure_waf_logrotate()
     # O ModSecurity v3 recusa um Include com curinga que não acha nada: cada arquivo
     # entra pelo nome, na ordem que o CRS pede.
     def each(pattern):
@@ -2208,13 +2227,424 @@ def waf_write(mode):
           "setvar:'tx.allowed_methods=GET HEAD POST OPTIONS PUT PATCH DELETE'\"\n")
     lines = ["# Gerado por olsbridge.", "Include %s/modsecurity.conf" % MODSEC_DIR,
              "Include %s/crs-setup.conf" % crs,
-             "Include %s/olsbridge-setup.conf" % MODSEC_DIR]
+             "Include %s/olsbridge-setup.conf" % MODSEC_DIR,
+             "Include %s/olsbridge-sites.conf" % MODSEC_DIR]
     for stage in ("config", "before"):
         lines += each("%s/plugins/*-%s.conf" % (wpx, stage))
         lines += each("%s/plugins/*-%s.conf" % (crs, stage))
     lines += each("%s/rules/*.conf" % crs)
     lines += each("%s/plugins/*-after.conf" % wpx) + each("%s/plugins/*-after.conf" % crs)
     write(os.path.join(MODSEC_DIR, "main.conf"), "\n".join(lines) + "\n")
+
+
+# WAF por site: modo e exclusões de regra de cada domínio, para o cliente liberar uma
+# regra só no site dele. Um JSON por domínio; as regras saem num arquivo só, com regras
+# de fase 1 que casam o Host (domínio e aliases) e usam ctl em tempo de execução, o que
+# vale até para as regras de fase 1 do CRS.
+WAF_SITES = os.path.join(LSWS, "conf", "waf-sites")
+WAF_SITE_MODES = ("inherit", "block", "detect", "off")
+WAF_RULE_BASE = 1010000
+WAF_MAX_EXCLUSIONS = 50
+WAF_ENGINE = {"block": "On", "detect": "DetectionOnly", "off": "Off"}
+WAF_SEVERITY = {"0": "EMERGENCY", "1": "ALERT", "2": "CRITICAL", "3": "ERROR", "4": "WARNING",
+                "5": "NOTICE", "6": "INFO", "7": "DEBUG"}
+WAF_LOGROTATE = "/etc/logrotate.d/olsbridge-modsec"
+# 949/959/980 somam a pontuação: liberar desligaria o WAF do site; 901 é a configuração.
+WAF_RULE_REFUSED = ("949", "959", "980", "901")
+DOMAIN_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?"
+                       r"(?:\.[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?)+$")
+NOTE_RE = re.compile(r"^[\w .,_\-()/:]{0,120}$", re.UNICODE)
+SENSITIVE = r"(?:pass|senha|token|secret|key|auth|cookie|session|xsrf|csrf)"
+
+
+class WafError(Exception):
+    """Erro com o código de saída do HestiaCP: 2 inválido, 3 não existe, 4 já existe,
+    8 limite, 20 falha ao aplicar."""
+    def __init__(self, code, message):
+        Exception.__init__(self, message)
+        self.code = code
+
+
+def iso_local(when):
+    stamp = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(when))
+    return stamp[:-2] + ":" + stamp[-2:]
+
+
+def waf_site_path(domain):
+    return os.path.join(WAF_SITES, domain + ".json")
+
+
+def waf_site_load(domain):
+    import json
+    try:
+        with open(waf_site_path(domain), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        data = {}
+    data.setdefault("mode", "inherit")
+    data.setdefault("exclusions", [])
+    data["domain"] = domain
+    return data
+
+
+def waf_site_save(data):
+    import json
+    os.makedirs(WAF_SITES, exist_ok=True)
+    os.chmod(WAF_SITES, 0o700)
+    path = waf_site_path(data["domain"])
+    if data["mode"] == "inherit" and not data["exclusions"]:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    tmp = path + ".new"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(data, handle, indent=1, ensure_ascii=False)
+    os.chmod(tmp, 0o600)
+    os.rename(tmp, path)
+
+
+def waf_next_id():
+    """Id de regra do ModSecurity, único e estável por exclusão ou modo de site."""
+    seq = os.path.join(WAF_SITES, ".seq")
+    try:
+        with open(seq) as handle:
+            last = int(handle.read().strip())
+    except (OSError, ValueError):
+        last = WAF_RULE_BASE
+    last += 1
+    os.makedirs(WAF_SITES, exist_ok=True)
+    with open(seq, "w") as handle:
+        handle.write("%d\n" % last)
+    return last
+
+
+def site_hosts(server):
+    """Domínio -> nomes que o servem (ServerName e ServerAlias), das vhosts do Apache."""
+    hosts = {}
+    for vhost in server.vhosts:
+        name = (vhost.name or "").lower()
+        if not DOMAIN_RE.match(name):
+            continue
+        names = hosts.setdefault(name, [name])
+        for alias in vhost.aliases:
+            alias = alias.lower()
+            if alias not in names and (DOMAIN_RE.match(alias) or
+                                       DOMAIN_RE.match(alias.replace("*.", "x.", 1))):
+                names.append(alias)
+    return hosts
+
+
+def waf_sites_state(server, server_mode, prune=False):
+    """Cada site com JSON: modo gravado, efetivo, hosts e exclusões. Com prune, apaga o
+    JSON de domínio que não existe mais (removido do painel)."""
+    hosts = site_hosts(server)
+    states = []
+    for path in sorted(glob.glob(os.path.join(WAF_SITES, "*.json"))):
+        domain = os.path.basename(path)[:-5]
+        if domain not in hosts:
+            if prune and hosts:
+                os.remove(path)
+            continue
+        data = waf_site_load(domain)
+        data["hosts"] = hosts[domain]
+        states.append(data)
+    for data in states:
+        data["effective"] = server_mode if data["mode"] == "inherit" else data["mode"]
+    return states
+
+
+def host_regex(names):
+    parts = []
+    for name in names:
+        if name.startswith("*."):
+            parts.append(r"[a-z0-9-]+\." + re.escape(name[2:]))
+        else:
+            parts.append(re.escape(name))
+    return r"^(?:%s)(?::\d+)?$" % "|".join(parts)
+
+
+def waf_sites_conf(server_mode, sites):
+    """Regras de fase 1 por site. Com o servidor em off e algum site ligado, o motor
+    global é DetectionOnly e os sites que não pediram WAF são desligados por Host."""
+    lines = []
+    host_rule = 'SecRule REQUEST_HEADERS:Host "@rx %s" "id:%d,phase:1,pass,nolog,t:none,t:lowercase,%s"'
+    if server_mode == "off":
+        enabled = [h for s in sites if s["effective"] != "off" for h in s["hosts"]]
+        lines.append('SecRule REQUEST_HEADERS:Host "!@rx %s" '
+                     '"id:1009300,phase:1,pass,nolog,t:none,t:lowercase,ctl:ruleEngine=Off"'
+                     % host_regex(enabled))
+    for site in sites:
+        regex = host_regex(site["hosts"])
+        lines.append("# %s: modo %s (efetivo %s)" % (site["domain"], site["mode"],
+                                                     site["effective"]))
+        effective = site["effective"]
+        engine_now = "detect" if server_mode == "off" else server_mode
+        if effective != engine_now and not (server_mode == "off" and effective == "off"):
+            lines.append(host_rule % (regex, site["mode_id"],
+                                      "ctl:ruleEngine=%s" % WAF_ENGINE[effective]))
+        for ex in site["exclusions"]:
+            remove = "ctl:ruleRemoveById=%s" % ex["rule"]
+            if not ex["path"]:
+                lines.append(host_rule % (regex, ex["sid"], remove))
+                continue
+            path = re.escape(ex["path"].rstrip("/")) + "(?:/|$)" if ex["path"] != "/" else "/"
+            lines.append(host_rule % (regex, ex["sid"], "chain"))
+            # Normalizado antes de comparar: /api/../admin não cai na exclusão de /api.
+            lines.append('    SecRule REQUEST_FILENAME "@rx ^%s" '
+                         '"t:none,t:urlDecodeUni,t:normalizePath,%s"' % (path, remove))
+    return "\n".join(lines) + "\n"
+
+
+def ensure_waf_logrotate():
+    """O log de auditoria cresce sem limite; 8 dias cobrem a consulta de 168 h."""
+    if os.path.exists(WAF_LOGROTATE) or not os.path.isdir("/etc/logrotate.d"):
+        return
+    write(WAF_LOGROTATE,
+          "%s {\n    daily\n    rotate 8\n    missingok\n    notifempty\n    compress\n"
+          "    delaycompress\n    copytruncate\n}\n" % MODSEC_AUDIT)
+
+
+def sanitize_uri(uri):
+    uri = re.sub(r"(?i)([?&;][^=&#;]*%s[^=&#;]*=)[^&#;]*" % SENSITIVE, r"\1***", uri or "")
+    return uri[:300]
+
+
+def sanitize_data(data):
+    """O trecho que disparou a regra, sem valor de senha, token, cookie ou Authorization."""
+    data = data or ""
+    match = re.match(r"(?s)^(Matched Data: ).*?( found within )([^:]+(?::[^:]*)?): (.*)$", data)
+    if match:
+        target = match.group(3)
+        if re.search(SENSITIVE, target, re.I) or re.match(
+                r"(?i)REQUEST_(COOKIES|HEADERS:(authorization|cookie|x-xsrf-token))", target):
+            data = "%s***%s%s: ***" % (match.group(1), match.group(2), target)
+    data = re.sub(r"(?i)(\b[\w\-\[\]]*%s[\w\-\[\]]*\s*[=:]\s*)([^&\s,;\"']+)" % SENSITIVE,
+                  r"\1***", data)
+    data = re.sub(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", r"\1 ***", data)
+    return data[:200]
+
+
+def audit_lines(hours, budget=64 << 20):
+    """Linhas do log de auditoria das últimas horas, do mais novo para o mais velho,
+    incluindo os arquivos girados pelo logrotate."""
+    import gzip
+    files = [MODSEC_AUDIT, MODSEC_AUDIT + ".1"] + [
+        "%s.%d.gz" % (MODSEC_AUDIT, n) for n in range(2, 9)]
+    cutoff = time.time() - hours * 3600
+    for path in files:
+        if not os.path.exists(path) or budget <= 0:
+            continue
+        if os.path.getmtime(path) < cutoff:
+            break
+        try:
+            opener = gzip.open if path.endswith(".gz") else open
+            with opener(path, "rb") as handle:
+                if not path.endswith(".gz"):
+                    size = os.path.getsize(path)
+                    handle.seek(max(0, size - budget))
+                data = handle.read(budget)
+        except OSError:
+            continue
+        budget -= len(data)
+        for line in reversed(data.decode("utf-8", "replace").splitlines()):
+            yield line
+
+
+def waf_log(hours=24, hosts=None, domain_of=None, limit=200):
+    """Eventos do WAF, sanitizados, e o resumo por regra e por hora. hosts limita a um
+    site (domínio e aliases); domain_of põe o domínio em cada evento."""
+    import json
+    cutoff = time.time() - hours * 3600
+    events, rules, by_hour = [], {}, {}
+    total = blocked_total = 0
+    for line in audit_lines(hours):
+        if not line.startswith("{"):
+            continue
+        try:
+            tx = json.loads(line).get("transaction", {})
+        except ValueError:
+            continue
+        try:
+            when = time.mktime(time.strptime(tx.get("time_stamp", ""), "%a %b %d %H:%M:%S %Y"))
+        except ValueError:
+            continue
+        if when < cutoff:
+            continue
+        request = tx.get("request", {})
+        host = str(request.get("headers", {}).get("host", "")).lower()
+        host = host.split("]")[0] + "]" if host.startswith("[") else host.split(":")[0]
+        if hosts is not None and not any(
+                host == h or (h.startswith("*.") and host.endswith(h[1:])) for h in hosts):
+            continue
+        status = tx.get("response", {}).get("http_code")
+        messages = tx.get("messages", [])
+        ids = [m.get("details", {}).get("ruleId", "") for m in messages]
+        was_blocked = status == 403 and any(i[:3] in ("949", "959") for i in ids)
+        found = []
+        for message in messages:
+            details = message.get("details", {})
+            rule = details.get("ruleId", "")
+            if not rule or rule[:3] in ("949", "959", "980"):
+                continue
+            if any(r["id"] == rule for r in found):
+                continue
+            found.append({"id": rule, "message": message.get("message", "")[:200],
+                          "severity": WAF_SEVERITY.get(str(details.get("severity", "")), ""),
+                          "data": sanitize_data(details.get("data", ""))})
+        if not found and not was_blocked:
+            continue
+        total += 1
+        blocked_total += was_blocked
+        hour = time.strftime("%Y-%m-%dT%H:00", time.localtime(when))
+        bucket = by_hour.setdefault(hour, {"hour": hour, "events": 0, "blocked": 0})
+        bucket["events"] += 1
+        bucket["blocked"] += was_blocked
+        for rule in found:
+            entry = rules.setdefault(rule["id"], {"id": rule["id"], "message": rule["message"],
+                                                  "count": 0})
+            entry["count"] += 1
+        if len(events) < limit:
+            event = {"id": str(tx.get("unique_id", "")), "time": iso_local(when),
+                     "ip": tx.get("client_ip", ""), "method": request.get("method", ""),
+                     "uri": sanitize_uri(request.get("uri", "")), "status": status,
+                     "blocked": was_blocked, "rules": found}
+            if domain_of is not None:
+                event = dict([("id", event["id"]), ("domain", domain_of(host))] +
+                             [(k, v) for k, v in event.items() if k != "id"])
+            events.append(event)
+    summary = {"events": total, "blocked": blocked_total,
+               "rules": sorted(rules.values(), key=lambda r: -r["count"]),
+               "by_hour": sorted(by_hour.values(), key=lambda b: b["hour"])}
+    return events, summary
+
+
+def waf_server():
+    config = ApacheConfig(Settings.load())
+    config.parse()
+    return build(config)
+
+
+def waf_require(domain, server=None):
+    if not os.path.exists(os.path.join(LSWS, "modules", "mod_security.so")):
+        raise WafError(3, "WAF indisponível: este OpenLiteSpeed não tem o mod_security")
+    domain = (domain or "").lower()
+    if not DOMAIN_RE.match(domain):
+        raise WafError(2, "domínio inválido")
+    hosts = site_hosts(server or waf_server())
+    if domain not in hosts:
+        raise WafError(3, "domínio %s não existe" % domain)
+    return domain, hosts[domain]
+
+
+def waf_apply(settings, need_rules):
+    """Instala as regras se um site passou a precisar e recarrega o OLS."""
+    try:
+        if need_rules and not os.path.isdir(waf_root("crs")):
+            waf_install()
+        if ols_pid():
+            if cmd_reload(settings, quiet=True) != 0:
+                raise WafError(20, "o OpenLiteSpeed não recarregou")
+        else:
+            generate(settings, quiet=True)
+    except (RuntimeError, OSError) as err:
+        raise WafError(20, "WAF: %s" % err)
+
+
+def cmd_waf_site(settings, args):
+    import json
+    import secrets
+    action = args.action
+    with bridge_lock():
+        domain, hosts = waf_require(args.domain)
+        data = waf_site_load(domain)
+    server_mode = settings.get("waf", "off")
+    if action == "show":
+        hours = args.hours
+        if not 1 <= hours <= 168:
+            raise WafError(2, "horas: de 1 a 168")
+        events, summary = waf_log(hours, hosts=hosts)
+        out = {"domain": domain, "mode": data["mode"],
+               "effective": server_mode if data["mode"] == "inherit" else data["mode"],
+               "server_mode": server_mode, "events": events, "summary": summary,
+               "exclusions": [{k: ex[k] for k in ("id", "rule", "path", "note", "created")}
+                              for ex in data["exclusions"]]}
+        print(json.dumps(out, indent=1, ensure_ascii=False))
+        return 0
+    if action == "add":
+        rule, path, note = args.rule, args.path or "", args.note or ""
+        if not re.match(r"^9\d{5}$", rule or "") or rule.startswith(WAF_RULE_REFUSED):
+            raise WafError(2, "regra inválida: 900000 a 999999, exceto 901xxx, 949xxx, "
+                              "959xxx e 980xxx")
+        if path and (len(path) > 200 or not SAFE_PATH.match(path)):
+            raise WafError(2, "caminho inválido")
+        if not NOTE_RE.match(note):
+            raise WafError(2, "motivo inválido")
+        with bridge_lock():
+            data = waf_site_load(domain)
+            if any(ex["rule"] == rule and ex["path"] == path for ex in data["exclusions"]):
+                raise WafError(4, "essa exclusão já existe")
+            if len(data["exclusions"]) >= WAF_MAX_EXCLUSIONS:
+                raise WafError(8, "limite de %d exclusões por site" % WAF_MAX_EXCLUSIONS)
+            ex = {"id": "ex_" + secrets.token_hex(4), "rule": rule, "path": path, "note": note,
+                  "created": iso_local(time.time()), "sid": waf_next_id()}
+            data["exclusions"].append(ex)
+            waf_site_save(data)
+        waf_apply(settings, False)
+        print(ex["id"])
+        return 0
+    if action == "delete":
+        if not re.match(r"^ex_[0-9a-f]{8}$", args.rule or ""):
+            raise WafError(3, "exclusão não existe")
+        with bridge_lock():
+            data = waf_site_load(domain)
+            kept = [ex for ex in data["exclusions"] if ex["id"] != args.rule]
+            if len(kept) == len(data["exclusions"]):
+                raise WafError(3, "exclusão não existe")
+            data["exclusions"] = kept
+            waf_site_save(data)
+        waf_apply(settings, False)
+        return 0
+    if action == "mode":
+        mode = args.rule
+        if mode not in WAF_SITE_MODES:
+            raise WafError(2, "modo: inherit, block, detect ou off")
+        with bridge_lock():
+            data = waf_site_load(domain)
+            data["mode"] = mode
+            if mode != "inherit" and not data.get("mode_id"):
+                data["mode_id"] = waf_next_id()
+            waf_site_save(data)
+        effective = server_mode if mode == "inherit" else mode
+        waf_apply(settings, effective != "off")
+        return 0
+    raise WafError(2, "ação inválida")
+
+
+def cmd_waf_log(settings, hours):
+    import json
+    if not os.path.exists(os.path.join(LSWS, "modules", "mod_security.so")):
+        raise WafError(3, "WAF indisponível: este OpenLiteSpeed não tem o mod_security")
+    if not 1 <= hours <= 168:
+        raise WafError(2, "horas: de 1 a 168")
+    owner = {}
+    for domain, names in site_hosts(waf_server()).items():
+        for name in names:
+            owner.setdefault(name, domain)
+
+    def domain_of(host):
+        if not host:
+            return "-"  # requisição sem Host (HTTP/1.0, varreduras)
+        if host in owner:
+            return owner[host]
+        for name, domain in owner.items():
+            if name.startswith("*.") and host.endswith(name[1:]):
+                return domain
+        return host
+
+    events, summary = waf_log(hours, domain_of=domain_of)
+    print(json.dumps({"server_mode": settings.get("waf", "off"), "events": events,
+                      "summary": summary}, indent=1, ensure_ascii=False))
+    return 0
 
 
 # Outro apt (o timer do WebP, uma atualização automática) pode estar com a trava do
@@ -2726,6 +3156,11 @@ HESTIA_FILES = [
     "bin/v-restart-sys-litespeed-php",
     "bin/v-change-sys-litespeed-option",
     "bin/v-list-sys-litespeed-stats",
+    "bin/v-list-sys-litespeed-waf",
+    "bin/v-list-web-domain-litespeed-waf",
+    "bin/v-add-web-domain-litespeed-waf-exclusion",
+    "bin/v-delete-web-domain-litespeed-waf-exclusion",
+    "bin/v-change-web-domain-litespeed-waf",
     "web/edit/server/litespeed/index.php",
     "web/templates/pages/edit_server_litespeed.php",
 ]
@@ -3465,7 +3900,9 @@ def cmd_install(settings, mode, offset):
         systemctl("daemon-reload")
         systemctl("enable", "olsbridge.service")
         code, out = systemctl("start", "olsbridge.service")
-        if code != 0 or not ols_listening():
+        # 30 s: sem o arquivo da lista do QUIC.cloud (ou com ele velho), o OLS baixa a
+        # lista na subida e espera até 10 s se quic.cloud não responder.
+        if code != 0 or not ols_listening(30):
             print("O OLS não subiu em todas as portas; voltando para %s.\n%s" %
                   (", ".join(units), out))
             systemctl("stop", "olsbridge.service")
@@ -3580,6 +4017,15 @@ def main(argv=None):
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
     sub.add_parser("stats", help="tempo real, bloqueios e WAF, em JSON")
+    wafsite = sub.add_parser("waf-site", help="WAF de um site: show, add, delete, mode")
+    wafsite.add_argument("action", choices=("show", "add", "delete", "mode"))
+    wafsite.add_argument("domain")
+    wafsite.add_argument("rule", nargs="?", help="regra (add), id (delete) ou modo (mode)")
+    wafsite.add_argument("path", nargs="?")
+    wafsite.add_argument("note", nargs="?")
+    wafsite.add_argument("--hours", type=int, default=24)
+    waflog = sub.add_parser("waf-log", help="eventos do WAF do servidor inteiro, em JSON")
+    waflog.add_argument("--hours", type=int, default=24)
     webp = sub.add_parser("webp", help="cópias WebP das imagens dos sites")
     webp.add_argument("--budget", type=int, default=300, help="segundos de conversão")
     setter = sub.add_parser("set", help="cache, http3, protection, waf")
@@ -3644,6 +4090,14 @@ def main(argv=None):
         return cmd_stats()
     if args.command == "webp":
         return cmd_webp(settings, args.budget)
+    if args.command in ("waf-site", "waf-log"):
+        try:
+            if args.command == "waf-log":
+                return cmd_waf_log(settings, args.hours)
+            return cmd_waf_site(settings, args)
+        except WafError as err:
+            print(err, file=sys.stderr)
+            return err.code
     if args.command == "check":
         return cmd_check(settings)
     if args.command == "compare":

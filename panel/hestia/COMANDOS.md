@@ -92,6 +92,87 @@ Chaves: `total`, `sites`, `php`, `ols_blocked`, `firewall_bans`, `waf` e `time`.
 - `firewall_bans` é a banlist do firewall do HestiaCP, onde caem também os jails `olsbridge-*` do fail2ban.
   Desbloqueio: `v-delete-firewall-ban IP CHAIN`.
 
+## WAF por site
+
+Feito a partir de `intenza-erp/docs/ESPEC-WAF-PONTE.md`. O cliente vê por que uma requisição do site dele foi
+barrada e libera uma regra só no site dele. Tudo vale para o domínio e os aliases dele.
+
+| Comando | Argumentos | O que faz |
+|---|---|---|
+| `v-list-web-domain-litespeed-waf` | `USER DOMAIN [HORAS] [FORMAT]` | Eventos do site (até 200, o mais novo primeiro), resumo por regra e por hora, modo e exclusões. HORAS: 1 a 168, padrão 24 |
+| `v-add-web-domain-litespeed-waf-exclusion` | `USER DOMAIN REGRA [CAMINHO] [MOTIVO]` | Desliga a regra no site, ou só em CAMINHO e abaixo dele. Imprime o id (`ex_` + 8 hex) |
+| `v-delete-web-domain-litespeed-waf-exclusion` | `USER DOMAIN ID` | Remove a exclusão |
+| `v-change-web-domain-litespeed-waf` | `USER DOMAIN MODO` | `inherit` (o do servidor), `block`, `detect` ou `off` |
+| `v-list-sys-litespeed-waf` | `[HORAS] [FORMAT]` | Eventos do servidor inteiro, com `domain` em cada um |
+
+Os comandos de site conferem o usuário e que o domínio é dele (`is_object_valid 'web'`), registram a ação no log
+do HestiaCP e aplicam com restart gracioso. A saída de lista é sempre JSON.
+
+Códigos de saída:
+
+| Código | Quando |
+|---|---|
+| `2` | Regra fora de 900000–999999, ou 901xxx, 949xxx, 959xxx, 980xxx (configuração e pontuação do CRS: liberar desligaria o WAF do site); caminho que não começa com `/`, com mais de 200 caracteres, espaço, aspas, `{}`, `;`, `` ` ``, `$`, `\`, `<>`, `|`; motivo com mais de 120 caracteres ou fora de letras, números, espaço e `.,_-()/:`; modo ou horas inválidos |
+| `3` | Usuário ou domínio não existe, o domínio não é do usuário, id de exclusão que não existe, ponte ou mod_security não instalados |
+| `4` | Já existe a mesma regra no mesmo caminho |
+| `8` | O site já tem 50 exclusões |
+| `20` | Falhou ao instalar as regras ou recarregar o OpenLiteSpeed |
+
+`v-list-web-domain-litespeed-waf USER DOMAIN json`:
+
+```json
+{
+ "domain": "alpha.test",
+ "mode": "inherit",
+ "effective": "block",
+ "server_mode": "block",
+ "events": [
+  {
+   "id": "177051234567.123456",
+   "time": "2026-11-07T20:11:55-03:00",
+   "ip": "203.0.113.9",
+   "method": "GET",
+   "uri": "/conta?token=***&id=1' OR '1'='1",
+   "status": 403,
+   "blocked": true,
+   "rules": [
+    {"id": "942100", "message": "SQL Injection Attack Detected via libinjection", "severity": "CRITICAL",
+     "data": "Matched Data: s&sos found within ARGS:id: 1' OR '1'='1"}
+   ]
+  }
+ ],
+ "summary": {"events": 12, "blocked": 9,
+             "rules": [{"id": "942100", "message": "SQL Injection Attack Detected via libinjection", "count": 7}],
+             "by_hour": [{"hour": "2026-11-07T20:00", "events": 3, "blocked": 2}]},
+ "exclusions": [{"id": "ex_a1b2c3d4", "rule": "942100", "path": "/api/webhook", "note": "Webhook do Mercado Pago",
+                 "created": "2026-11-07T21:30:00-03:00"}]
+}
+```
+
+`v-list-sys-litespeed-waf` tem `server_mode`, `events` (com `domain` logo depois de `id`) e `summary`.
+
+Detalhes:
+
+- **`blocked`**: `true` quando a resposta foi 403 e a regra de pontuação (949xxx/959xxx) disparou. Em `detect` o
+  evento aparece com `blocked: false`. As regras de pontuação (949, 959, 980) não aparecem em `rules`.
+- **Dados sensíveis**: nunca sai corpo, cookie ou cabeçalho. `data` sai cortado em 200 caracteres e `uri` em 300.
+  Valores de parâmetros cujo nome contém `pass`, `senha`, `token`, `secret`, `key`, `auth`, `cookie`, `session`,
+  `xsrf` ou `csrf` viram `***`, na URI e no `data`, e também o trecho que bateu num desses parâmetros, num cookie
+  ou nos cabeçalhos `Authorization`, `Cookie` e `X-XSRF-TOKEN`.
+- **Caminho**: vale para o caminho e o que está abaixo dele (`/api` cobre `/api` e `/api/x`, não `/apiary`). O
+  caminho da requisição é decodificado e normalizado antes da comparação: `/api/../admin` não cai na exclusão.
+  Sem caminho, vale para o site inteiro.
+- **Modo**: `block` e `detect` funcionam mesmo com o WAF do servidor em `off`: o módulo é carregado em modo
+  `DetectionOnly` e só os sites que pediram WAF são avaliados.
+- **Persistência**: um JSON por domínio em `/usr/local/lsws/conf/waf-sites/` (root, 0600). Sobrevive ao `sync`, a
+  restart e a mudanças do domínio no painel; quando o domínio some da configuração do Apache, o `sync` apaga o
+  JSON. As regras saem em `/usr/local/lsws/conf/modsec/olsbridge-sites.conf`, antes do CRS, com ids a partir de
+  1010000, estáveis por exclusão.
+- **Histórico**: o log de auditoria gira todo dia e guarda 8 dias (`/etc/logrotate.d/olsbridge-modsec`), o que
+  cobre as 168 h.
+- Na ponte, o mesmo pela linha de comando: `olsbridge waf-site show|add|delete|mode DOMAIN ...` e
+  `olsbridge waf-log --hours N`.
+
 ## Mudanças em comandos e telas do HestiaCP
 
 Estes trechos ficam entre marcadores `olsbridge:begin`/`olsbridge:end`. O gancho

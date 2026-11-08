@@ -295,7 +295,7 @@ O arranjo do itzvpc2, em Ubuntu 26.04 com o PHP do Sury: nginx na frente, Apache
 pelo lsphp com o usuário, o `.user.ini` e o pool, muda o `php.ini` e um pool e reinicia o `php8.4-fpm` como o painel,
 faz 60 requisições num pool de 2 filhos, liga o WAF, testa o WebP (cópia com o dono da imagem, WebP só para quem
 aceita) e o limite por IP (300 conexões slowloris de um segundo container: o IP é banido e os outros seguem
-atendidos), confere PUT, PATCH e DELETE com o WAF ligado, reinicia o OLS como num boot e desinstala. São 40
+atendidos), confere PUT, PATCH e DELETE com o WAF ligado, testa o WAF por site (exclusões, modos, recusas e dados sensíveis, como pede a especificação do ERP), reinicia o OLS como num boot e desinstala. São 80
 verificações.
 
 Os arquivos em `panel/test/hestia/fixtures/` e `panel/test/replace/fixtures/` vêm do

@@ -30,14 +30,14 @@ docker exec "$name" /usr/local/lsws/bin/olsbridge set protection strict >/dev/nu
 sleep 2
 docker run -d --name "$client" --entrypoint sleep olsbridge-replace 300 >/dev/null
 expect "outro IP antes do ataque" 200 "$(get_code "$client")"
-# Slowloris: 300 conexões com o cabeçalho pela metade, acima do limite de 200 por IP do
+# Slowloris: 400 conexões com o cabeçalho pela metade, acima do limite de 200 por IP do
 # nível strict. Uma rajada de requisições completas não serve de teste: acima do limite
 # soft o OLS desliga o keep-alive e fecha cada conexão depois da resposta, e uma conexão
 # sem dados nem chega ao OLS (deferred accept).
 docker exec "$client" python3 -c "
 import socket, time
 socks = []
-for i in range(300):
+for i in range(400):
     try:
         s = socket.create_connection(('$SIP', 80), timeout=3)
         s.sendall(b'GET /who.txt HTTP/1.1\r\nHost: alpha.test\r\n')
@@ -57,5 +57,6 @@ sleep 2
 expect "bloqueio some com o restart" 200 "$(get_code "$client")"
 docker rm -f "$client" >/dev/null
 
+docker exec "$name" sh /test/waf.sh || status=1
 docker exec "$name" sh /test/finish.sh || status=1
 exit $status
