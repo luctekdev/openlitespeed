@@ -27,6 +27,17 @@ Opções de `v-change-sys-litespeed-option`:
 | `webp` | `on`, `off` | `on` |
 | `protection` | `off`, `standard`, `strict` | `standard` |
 | `waf` | `off`, `detect`, `block` | `block` |
+| `limits` | `on`, `off` (CPU, memória e disco por usuário, cgroups v2) | `on` |
+| `limit_cpu` | `50%`, `100%`, `200%`, `400%`, `off` | `200%` |
+| `limit_mem` | `512M`, `1G`, `2G`, `4G`, `off` | `2G` |
+| `limit_tasks` | `100`, `200`, `400`, `1000`, `off` | `400` |
+| `limit_io` | `10M`, `25M`, `50M`, `100M`, `off` | `50M` |
+| `limit_iops` | `500`, `1000`, `2000`, `off` | `1000` |
+
+Os `limit_*` são o padrão; os campos de recursos do plano (`CPU_QUOTA`, `CPU_QUOTA_PERIOD`, `MEMORY_LIMIT`,
+`SWAP_LIMIT`), quando não são `unlimited`, valem no lugar deles. `v-list-sys-litespeed json` traz em `limits` uma
+linha por usuário (limites, de onde vieram, CPU usada e freada, memória, processos, mortes por falta de memória), e
+`v-list-sys-litespeed-stats json` traz o mesmo em `users`, que a página usa para a CPU de agora.
 
 Códigos de saída: os do HestiaCP (`0` ok; `1` argumentos; `2` valor inválido; `3` não existe, ou seja, olsbridge
 não instalado; `20` falha ao aplicar).

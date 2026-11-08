@@ -31,6 +31,12 @@ $options = [
 	"mem_cache" => ["auto", "64M", "256M", "512M"],
 	"protection" => ["off", "standard", "strict"],
 	"waf" => ["off", "detect", "block"],
+	"limits" => ["on", "off"],
+	"limit_cpu" => ["50%", "100%", "200%", "400%", "off"],
+	"limit_mem" => ["512M", "1G", "2G", "4G", "off"],
+	"limit_tasks" => ["100", "200", "400", "1000", "off"],
+	"limit_io" => ["10M", "25M", "50M", "100M", "off"],
+	"limit_iops" => ["500", "1000", "2000", "off"],
 ];
 
 if (!empty($_POST["action"])) {
@@ -121,7 +127,15 @@ $olsb_options = $olsb["options"] + [
 	"protection" => "standard",
 	"waf" => "off",
 	"waf_available" => false,
+	"limits" => "off",
+	"limit_cpu" => "200%",
+	"limit_mem" => "2G",
+	"limit_tasks" => "400",
+	"limit_io" => "50M",
+	"limit_iops" => "1000",
+	"limits_available" => false,
 ];
+$olsb_limits = $olsb["limits"] ?? [];
 
 // Render page
 render_page($user, $TAB, "edit_server_litespeed");

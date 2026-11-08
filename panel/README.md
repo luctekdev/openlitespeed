@@ -82,8 +82,9 @@ Outros comandos:
 | `olsbridge sync` | O que o timer roda a cada 30 segundos: gera de novo e recarrega se algo mudou |
 | `olsbridge php-restart [8.2 ...]` | Reinicia o lsphp sem derrubar requisições |
 | `olsbridge php-install` | Instala o `phpX.Y-litespeed` de cada versão do PHP-FPM |
-| `olsbridge set OPÇÃO VALOR` | `cache`, `http3`, `webp`, `protection`, `waf` (abaixo) |
-| `olsbridge stats` | Tempo real, IPs bloqueados e eventos do WAF, em JSON |
+| `olsbridge set OPÇÃO VALOR` | `cache`, `http3`, `webp`, `protection`, `waf`, `limits`, `limit_*` (abaixo) |
+| `olsbridge limits [--json]` | Limites e consumo de CPU, memória e disco de cada usuário |
+| `olsbridge stats` | Tempo real, IPs bloqueados, eventos do WAF e CPU e memória por usuário, em JSON |
 | `olsbridge webp` | Cria as cópias WebP que faltam (o timer roda a cada 10 minutos) |
 
 A configuração gerada fica em `/usr/local/lsws/conf/bridge/`, com `warnings.txt` listando o que não foi convertido. Os
@@ -215,6 +216,12 @@ As opções valem para o servidor inteiro. Mudam pela página do OpenLiteSpeed n
 | `http3` | `off` | HTTP/3 (QUIC). Ligar abre UDP 443 no firewall do HestiaCP (regra HTTP3) |
 | `protection` | `standard` | `off`, `standard` ou `strict`: conexões por IP, reCAPTCHA sob ataque, login do WordPress e jails do fail2ban |
 | `waf` | `off` | `off`, `detect` ou `block`: ModSecurity com o OWASP CRS 4 e as exclusões do WordPress. Aceita PUT, PATCH e DELETE (APIs REST, Laravel), que o CRS sozinho barra |
+| `limits` | `on` | Recursos por cliente (abaixo): o PHP de cada usuário com limite de CPU, memória, processos e disco |
+| `limit_cpu` | `200%` | CPU por usuário: `50%`, `100%` (um núcleo), `200%`, `400%` ou `off` |
+| `limit_mem` | `2G` | Memória por usuário: `512M`, `1G`, `2G`, `4G` ou `off`. Swap até um quarto disso |
+| `limit_tasks` | `400` | Processos e threads por usuário: `100`, `200`, `400`, `1000` ou `off` |
+| `limit_io` | `50M` | Leitura e escrita no disco da home, por segundo, cada uma: `10M`, `25M`, `50M`, `100M` ou `off` |
+| `limit_iops` | `1000` | Operações de leitura e de escrita por segundo: `500`, `1000`, `2000` ou `off` |
 
 Fixos, sem opção: links simbólicos só seguidos quando o dono do link é o dono do destino (como o
 `SymLinksIfOwnerMatch` do Apache: um cliente não serve o arquivo de outro), pastas de sistema negadas
@@ -246,6 +253,68 @@ jail `olsbridge-limit` do fail2ban leva o IP para o firewall do HestiaCP.
 Jails do fail2ban (ação `hestia[name=WEB]`, visíveis e removíveis em Server → Firewall → Banlist):
 `olsbridge-limit` (limite por IP), `olsbridge-wp` (login do WordPress), `olsbridge-waf` (bloqueios do WAF) e
 `olsbridge-scan` (varredura de `.env`, `.git`, `wp-config` e afins).
+
+### Recursos por cliente
+
+O equivalente ao LVE do CloudLinux, com cgroups v2 e systemd. Com `limits` ligado, o `server.conf` leva `cgroups 2`
+no `CGIRLimit`, e o `lscgid` do OLS (o processo, rodando como root, que inicia o lsphp com o usuário de cada pool)
+escreve o PID do processo em `/sys/fs/cgroup/user.slice/user-UID.slice/litespeed-exec.scope` **antes** de trocar
+para o usuário e chamar o `exec`. O lsphp e todos os filhos nascem na fatia do dono do site, sem janela fora dela. O
+usuário não ganha nenhum acesso a cgroups: não há wrapper nem setuid, e quem move o processo é o root, antes do
+`setuid`. É o código de cgroups que já vem no OLS; a ponte só liga e põe os limites.
+
+A fatia `user-UID.slice` é a mesma das sessões SSH e do cron do usuário: PHP, SSH e cron somam juntos, como no LVE.
+Com o servidor cheio, o kernel divide a CPU por igual entre as fatias (não mais entre processos), e cada uma fica
+abaixo dos tetos. A ponte grava `/etc/systemd/system/user-UID.slice.d/60-olsbridge.conf` para cada dono de pool com
+UID a partir de 1000:
+
+| Na fatia | De onde vem |
+|---|---|
+| `CPUQuota`, `CPUQuotaPeriodSec` | `CPU_QUOTA` e `CPU_QUOTA_PERIOD` do plano do HestiaCP; sem eles (`unlimited`), `limit_cpu` |
+| `MemoryMax` | `MEMORY_LIMIT` do plano, ou `limit_mem`. Teto rígido: passou, o OOM mata o maior processo **do usuário** e a requisição falha na hora |
+| `MemorySwapMax` | `SWAP_LIMIT` do plano, ou um quarto da memória |
+| `TasksMax` | `limit_tasks` |
+| `IORead/WriteBandwidthMax`, `IORead/WriteIOPSMax` | `limit_io` e `limit_iops`, no disco da home do usuário (o systemd acha o disco, também em LVM) |
+| `StopWhenUnneeded=no` | Fixo. O padrão do systemd desfaz a fatia de quem não tem sessão aberta, e o lsphp ficava num cgroup sem os limites novos |
+
+Detalhes que valem saber:
+
+- **Plano do HestiaCP.** Os campos de recursos do plano só aparecem em Packages com "Resource limits" ligado em
+  Configure Server (`RESOURCES_LIMIT`, `v-add-sys-cgroups`). A ponte lê os valores do `user.conf` de cada usuário
+  mesmo com a opção desligada. Com ela ligada, o HestiaCP grava os seus próprios drop-ins (`50-*.conf`, pelo
+  `systemctl set-property`); o `60-olsbridge.conf` vem depois e já inclui o plano, então os dois concordam. A troca de
+  plano chega à fatia no próximo `sync` (até 30 s).
+- **Sem `MemoryHigh`.** Entre o `MemoryHigh` e o `MemoryMax` o kernel só freia o grupo: no teste, uma requisição com
+  vazamento ficou parada em 2,3 GB até ser morta à mão. Com teto rígido ela cai em 3 s.
+- **Sem `IOWeight`.** O agendador de disco das VMs (`none`, `mq-deadline`) ignora o peso; o que separa os clientes é o
+  teto de banda e de operações. Arquivos que já estão na memória (o caso comum do PHP) não contam. O que o MySQL faz
+  pelo site conta no `mysql.service`, não no usuário.
+- **Mudanças valem na hora**, pelo `daemon-reload`, sem reiniciar o PHP. Ligar ou desligar `limits` reinicia o lsphp
+  (gracioso) para ele entrar ou sair das fatias. Restart do OLS, boot e `sync` mantêm tudo; uma fatia parada à mão volta
+  no próximo `sync` ou na próxima requisição.
+- **Desligar** (`limits off`) ou `olsbridge uninstall` apaga os drop-ins da ponte; o plano do HestiaCP, se ligado,
+  continua valendo para SSH e cron, como antes.
+- Precisa de cgroups v2 com systemd (Ubuntu 22.04+, Debian 11+, AlmaLinux 9). No AlmaLinux 8, que usa cgroups v1, a
+  opção fica indisponível e a geração avisa.
+
+Na página do OpenLiteSpeed, a seção "Resources per customer" troca as opções e mostra cada usuário com o plano, a CPU
+de agora, o tempo de CPU freado pelo limite, a memória e as mortes por falta de memória. `olsbridge limits` mostra o
+mesmo no terminal (`*` marca o valor que veio do plano).
+
+Medido no itzvpc2 (8 vCPU), com testehes queimando CPU nos três domínios dele e uma página PHP de outro usuário
+(mediana de 30 requisições):
+
+| `limits` | Página sozinha | Com testehes queimando | CPU do servidor |
+|---|---|---|---|
+| `off` (antes) | 86 ms | 131 ms (+53%) | 100% |
+| `on`, sem teto de CPU | 86 ms | 70 ms | 100% (dividida por igual entre as fatias) |
+| `on`, `limit_cpu 200%` | 87 ms | 83 ms | 35% |
+
+No contêiner (`test/replace/limits.sh`, 12 núcleos, carol queimando com 24 processos): a página PHP de alice foi de
+26 para 159 ms com `limits off` e ficou em 26 ms com `limits on`.
+
+Disco: com `limit_io 50M`, um `dd` com `oflag=direct` de testehes ficou em 28 MB/s; o mesmo de outro usuário sem
+limite, 1,9 GB/s. Memória: com `limit_mem 2G`, um processo pedindo 4 GB foi morto em 2,9 s, só ele.
 
 ### Medições no itzvpc2 (2026-11-07)
 
@@ -302,8 +371,9 @@ O arranjo do itzvpc2, em Ubuntu 26.04 com o PHP do Sury: nginx na frente, Apache
 pelo lsphp com o usuário, o `.user.ini` e o pool, muda o `php.ini` e um pool e reinicia o `php8.4-fpm` como o painel,
 faz 60 requisições num pool de 2 filhos, liga o WAF, testa o WebP (cópia com o dono da imagem, WebP só para quem
 aceita) e o limite por IP (300 conexões slowloris de um segundo container: o IP é banido e os outros seguem
-atendidos), confere PUT, PATCH e DELETE com o WAF ligado, testa o WAF por site (exclusões, modos, recusas e dados sensíveis, como pede a especificação do ERP), testa a proteção de hospedagem compartilhada (links simbólicos entre clientes, logrotate do HestiaCP, tempo máximo e saída do PHP ocioso), reinicia o OLS como num boot e desinstala. São 98
-verificações.
+atendidos), confere PUT, PATCH e DELETE com o WAF ligado, testa o WAF por site (exclusões, modos, recusas e dados sensíveis, como pede a especificação do ERP), testa a proteção de hospedagem compartilhada (links simbólicos entre clientes, logrotate do HestiaCP, tempo máximo e saída do PHP ocioso), os recursos por cliente (`limits.sh`: o lsphp de cada usuário na fatia dele; um cliente queimando CPU com o dobro de processos que núcleos, e a página PHP de outro, que com `limits off` fica mais lenta, com `limits on` não passa de 1,5 vez o tempo sozinha mais 20 ms; plano do HestiaCP no lugar do padrão; PHP acima do teto de memória falhando em segundos sem tocar no vizinho; restart, `sync` e fatia parada), reinicia o OLS como num boot e desinstala. São 135
+verificações. O container usa um cgroup próprio (`--cgroupns=private`), para o systemd dele ficar na raiz de
+`/sys/fs/cgroup` como num servidor. `OLSB_IMAGE=outra-tag sh panel/test/replace/run.sh` roda com outra imagem.
 
 Os arquivos em `panel/test/hestia/fixtures/` e `panel/test/replace/fixtures/` vêm do
 [HestiaCP](https://github.com/hestiacp/hestiacp), sob GPLv3: os templates de domínio do commit `3c52c6c`;

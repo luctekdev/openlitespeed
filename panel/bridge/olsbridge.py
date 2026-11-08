@@ -5,6 +5,7 @@
     olsbridge start|stop|reload   comandos usados pela unidade do systemd
     olsbridge sync                gera de novo e recarrega só se o Apache mudou
     olsbridge status
+    olsbridge limits              limites e consumo de CPU, memória e disco por usuário
     olsbridge check               mostra o que seria gerado, sem escrever nada
     olsbridge php-restart [8.2..] reinicia o lsphp, sem derrubar requisições
     olsbridge php-install         instala o phpX.Y-litespeed de cada versão do PHP-FPM
@@ -23,6 +24,7 @@ import argparse
 import glob
 import hashlib
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -71,6 +73,16 @@ DEFAULTS = {
     "protection": "standard",
     # off, detect (só registra) ou block: ModSecurity com as regras OWASP CRS.
     "waf": "off",
+    # Recursos por cliente, como o LVE do CloudLinux (cgroups v2): o lscgid, ainda como
+    # root, põe o lsphp de cada usuário na fatia dele (user-UID.slice), e a ponte dá à
+    # fatia os limites abaixo. CPU_QUOTA, MEMORY_LIMIT e SWAP_LIMIT do plano do HestiaCP
+    # valem no lugar do padrão quando o plano não diz unlimited.
+    "limits": "on",
+    "limit_cpu": "200%",       # 100% é um núcleo
+    "limit_mem": "2G",         # RAM (MemoryMax); swap até um quarto disso
+    "limit_tasks": "400",      # processos e threads, contra fork bomb
+    "limit_io": "50M",         # leitura e escrita em disco, por segundo, cada uma
+    "limit_iops": "1000",
 }
 
 # Níveis de proteção. Conexões simultâneas por IP: acima de soft por grace segundos,
@@ -1069,6 +1081,217 @@ def mem_cache_mb(value):
     return max(32, min(256, ram // 32))
 
 
+# --------------------------------------------------------------------------
+# Recursos por cliente (cgroups v2)
+#
+# Com `cgroups 2` no CGIRLimit, o lscgid do OLS escreve o PID de cada processo que vai
+# iniciar em /sys/fs/cgroup/user.slice/user-UID.slice/litespeed-exec.scope antes de
+# trocar para o usuário e chamar o exec: o lsphp e todos os filhos dele já nascem na
+# fatia do dono do site. Quem move é o root, antes do setuid; o usuário não ganha nenhum
+# poder sobre cgroups. A fatia é a mesma das sessões SSH e do cron do usuário, a que o
+# HestiaCP usa nos limites do plano (v-update-user-cgroup): PHP, SSH e cron somam juntos,
+# como no LVE.
+
+CGROUP_ROOT = "/sys/fs/cgroup"
+HESTIA_USERS = "/usr/local/hestia/data/users"
+# Depois dos 50-*.conf que o `systemctl set-property` do HestiaCP grava: o que a ponte
+# calcula já inclui o plano.
+LIMIT_DROPIN = "60-olsbridge.conf"
+LIMIT_MIN_UID = 1000  # www-data (pool www) e outros usuários de sistema ficam de fora
+LIMIT_KEYS = ("cpu", "mem", "tasks", "io", "iops")
+
+
+def cgroup_v2():
+    return os.path.exists(os.path.join(CGROUP_ROOT, "cgroup.controllers")) and \
+        os.path.isdir("/run/systemd/system")
+
+
+def size_bytes(text):
+    match = re.match(r"^(\d+)([KMGT]?)$", (text or "").strip().upper())
+    if not match:
+        return None
+    return int(match.group(1)) * 1024 ** " KMGT".index(match.group(2) or " ")
+
+
+def user_limits(user, settings, warnings):
+    """Limites de um usuário: os do plano do HestiaCP (que o painel copia no user.conf)
+    quando não são unlimited, senão os padrões da ponte. None: sem limite."""
+    conf = read_hestia_conf(os.path.join(HESTIA_USERS, user, "user.conf"))
+    found = {"user": user, "package": conf.get("PACKAGE", "")}
+
+    def pick(name, option, key, pattern):
+        value = conf.get(key, "").strip() if key else ""
+        if value and value != "unlimited":
+            if re.match(pattern, value):
+                found[name], found[name + "_from"] = value, "package"
+                return
+            warnings.append("usuário %s: %s='%s' inválido no plano, vale o padrão" %
+                            (user, key, value))
+        value = settings.get(option, DEFAULTS.get(option, "off")) if option else "off"
+        found[name], found[name + "_from"] = (None if value == "off" else value), "default"
+
+    pick("cpu", "limit_cpu", "CPU_QUOTA", r"^[1-9]\d*%$")
+    pick("cpu_period", None, "CPU_QUOTA_PERIOD", r"^\d+(?:ms|s)$")
+    pick("mem", "limit_mem", "MEMORY_LIMIT", r"^\d+[KMGTkmgt]?$")
+    pick("swap", None, "SWAP_LIMIT", r"^\d+[KMGTkmgt]?$")
+    pick("tasks", "limit_tasks", None, "")
+    pick("io", "limit_io", None, "")
+    pick("iops", "limit_iops", None, "")
+    # O MemoryMax só conta a RAM: sem teto de swap, o que passa dele vai para o swap
+    # (medido: 1,1 GB de 3 GB), e o disco de todos paga. Padrão: um quarto da memória.
+    if found["swap"] is None and size_bytes(found["mem"]):
+        found["swap"] = "%dM" % max(1, size_bytes(found["mem"]) // 4 // 1048576)
+    return found
+
+
+def limit_dropin(limits, home):
+    """Drop-in da fatia user-UID.slice. A primeira linha guarda os valores para o status."""
+    import json
+    lines = ["# olsbridge %s" % json.dumps(limits, sort_keys=True),
+             "# Gerado por olsbridge: recursos de %s. Não edite: olsbridge set limit_*, ou o"
+             " plano do HestiaCP." % limits["user"],
+             "[Unit]",
+             # O padrão do systemd desfaz a fatia de quem não tem sessão aberta: o lsphp
+             # ficava num cgroup sem dono, fora do alcance dos limites novos.
+             "StopWhenUnneeded=no",
+             "",
+             "[Slice]",
+             "CPUAccounting=yes",
+             "MemoryAccounting=yes",
+             "TasksAccounting=yes",
+             "IOAccounting=yes"]
+    if limits["cpu"]:
+        lines.append("CPUQuota=%s" % limits["cpu"])
+    if limits["cpu_period"]:
+        lines.append("CPUQuotaPeriodSec=%s" % limits["cpu_period"])
+    mem = size_bytes(limits["mem"])
+    if mem:
+        # Teto rígido, como o PMEM do LVE: no limite o kernel devolve o cache de arquivos
+        # do usuário e, se não bastar, o OOM mata o maior processo dele (nunca o de outro).
+        # Sem MemoryHigh: entre ele e o MemoryMax o kernel só freia, e uma requisição com
+        # vazamento de memória ficava parada até o php_timeout (medido) em vez de falhar.
+        # infinity também desfaz o MemoryHigh que o HestiaCP grava com o plano.
+        lines += ["MemoryHigh=infinity", "MemoryMax=%d" % mem]
+    if size_bytes(limits["swap"]) is not None:
+        lines.append("MemorySwapMax=%d" % size_bytes(limits["swap"]))
+    if limits["tasks"]:
+        lines.append("TasksMax=%s" % limits["tasks"])
+    # O agendador de disco das VMs (none, mq-deadline) ignora o IOWeight: o que separa os
+    # clientes é o teto de banda e de operações no disco da home (o systemd acha o disco).
+    if home and SAFE_PATH.match(home):
+        if limits["io"]:
+            lines += ["IOReadBandwidthMax=%s %s" % (home, limits["io"]),
+                      "IOWriteBandwidthMax=%s %s" % (home, limits["io"])]
+        if limits["iops"]:
+            lines += ["IOReadIOPSMax=%s %s" % (home, limits["iops"]),
+                      "IOWriteIOPSMax=%s %s" % (home, limits["iops"])]
+    return "\n".join(lines) + "\n"
+
+
+def limit_dropin_path(uid):
+    return os.path.join(SYSTEMD, "user-%d.slice.d" % uid, LIMIT_DROPIN)
+
+
+def limit_dropins():
+    """{uid: caminho} dos drop-ins que a ponte gravou."""
+    found = {}
+    for path in glob.glob(os.path.join(SYSTEMD, "user-*.slice.d", LIMIT_DROPIN)):
+        match = re.search(r"/user-(\d+)\.slice\.d/", path)
+        if match:
+            found[int(match.group(1))] = path
+    return found
+
+
+def apply_limits(plan):
+    """Grava os drop-ins das fatias, apaga os de quem saiu e liga as fatias. O
+    daemon-reload aplica os valores novos às fatias ativas, sem reiniciar nada."""
+    changed = False
+    for uid, path in limit_dropins().items():
+        if uid not in plan:
+            os.remove(path)
+            try:
+                os.rmdir(os.path.dirname(path))
+            except OSError:
+                pass
+            changed = True
+    for uid, text in plan.items():
+        path = limit_dropin_path(uid)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                same = handle.read() == text
+        except OSError:
+            same = False
+        if not same:
+            write(path, text)
+            changed = True
+    if changed:
+        systemctl("daemon-reload")
+    if plan:
+        # O lscgid desliga os cgroups se user.slice não existe quando o OLS sobe.
+        if not os.path.isdir(os.path.join(CGROUP_ROOT, "user.slice")):
+            systemctl("start", "user.slice")
+        names = ["user-%d.slice" % uid for uid in sorted(plan)]
+        _code, out = systemctl("is-active", *names)
+        states = out.split()
+        stopped = [n for i, n in enumerate(names) if i >= len(states) or states[i] != "active"]
+        if stopped:
+            systemctl("start", *stopped)
+    return changed
+
+
+def read_cgroup(path, name):
+    try:
+        with open(os.path.join(path, name)) as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def cgroup_keyed(text):
+    found = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].isdigit():
+            found[parts[0]] = int(parts[1])
+    return found
+
+
+def limits_report():
+    """Limites e consumo de cada usuário com fatia da ponte: CPU usada e freada (segundos
+    desde que a fatia subiu), memória, processos e mortes por falta de memória."""
+    import json
+    rows = []
+    for uid, path in sorted(limit_dropins().items()):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                head = handle.readline()
+            limits = json.loads(head[len("# olsbridge "):]) if head.startswith(
+                "# olsbridge ") else {}
+        except (OSError, ValueError):
+            limits = {}
+        cg = os.path.join(CGROUP_ROOT, "user.slice", "user-%d.slice" % uid)
+        cpu = cgroup_keyed(read_cgroup(cg, "cpu.stat"))
+        events = cgroup_keyed(read_cgroup(cg, "memory.events"))
+        procs = 0
+        for base, _dirs, files in os.walk(cg):
+            if "cgroup.procs" in files:
+                procs += len(read_cgroup(base, "cgroup.procs").split())
+        mem = read_cgroup(cg, "memory.current").strip()
+        tasks = read_cgroup(cg, "pids.current").strip()
+        row = dict((k, limits.get(k)) for k in LIMIT_KEYS + ("user", "package"))
+        row.update({"uid": uid, "from": dict((k, limits.get(k + "_from")) for k in LIMIT_KEYS),
+                    "active": os.path.isdir(cg),
+                    "cpu_usec": cpu.get("usage_usec", 0),
+                    "throttled_usec": cpu.get("throttled_usec", 0),
+                    "memory": int(mem) if mem.isdigit() else 0,
+                    "memory_high_events": events.get("high", 0),
+                    "oom_kills": events.get("oom_kill", 0),
+                    "tasks_now": int(tasks) if tasks.isdigit() else 0,
+                    "processes": procs})
+        rows.append(row)
+    return rows
+
+
 class Generator(object):
     def __init__(self, server, settings, warnings):
         self.server = server
@@ -1091,6 +1314,26 @@ class Generator(object):
         self.webp = settings.get("webp", DEFAULTS["webp"]) == "on"
         self.php_timeout = settings.get("php_timeout", DEFAULTS["php_timeout"])
         self.mem_cache = mem_cache_mb(settings.get("mem_cache", DEFAULTS["mem_cache"]))
+        self.limits = settings.get("limits", DEFAULTS["limits"]) == "on"
+        if self.limits and not cgroup_v2():
+            self.warnings.append("limits: sem cgroups v2 com systemd; o PHP dos clientes segue "
+                                 "sem limite de CPU, memória e disco")
+            self.limits = False
+        self.limit_plan = {}     # uid -> drop-in da fatia user-UID.slice
+
+    def plan_limits(self):
+        """Uma fatia com limites para cada dono de pool com lsphp."""
+        plan = {}
+        for user in sorted(set(p.user for p in self.pool_of.values() if p.user)):
+            try:
+                entry = pwd.getpwnam(user)
+            except KeyError:
+                continue
+            if entry.pw_uid < LIMIT_MIN_UID:
+                continue
+            limits = user_limits(user, self.settings, self.warnings)
+            plan[entry.pw_uid] = limit_dropin(limits, entry.pw_dir)
+        return plan
 
     def processor(self, address):
         if address == "acme" and address not in self.processors:
@@ -1280,6 +1523,8 @@ class Generator(object):
         for vhost in vhosts:
             files["vhosts/%s.conf" % vhost.ols_name] = self.vhconf(vhost)
         files["server.conf"] = self.server_conf(vhosts)
+        if self.limits:
+            self.limit_plan = self.plan_limits()
         return files
 
     def listeners(self, vhosts):
@@ -1383,7 +1628,10 @@ class Generator(object):
                # Sem este bloco o OLS não configura o lscgid, e nenhum lsphp sobe com o
                # usuário do domínio ("cgidSuEXEC failed").
                "CGIRLimit {",
-               "    maxCGIInstances       100",
+               "    maxCGIInstances       100"] + (
+               # 2: ligado para todos os processos que o lscgid inicia (o lsphp de cada
+               # pool); cada um nasce na fatia do seu usuário (Recursos por cliente).
+               ["    cgroups               2"] if self.limits else []) + [
                "    minUID                11",
                "    minGID                10",
                "    priority              0",
@@ -1837,6 +2085,10 @@ def generate(settings, quiet=False):
         files[".digest"] = digest + "\n"
         swap_dir(OUT, files, lambda name: 0o600 if name.startswith("ssl/") else 0o644)
         link_server_conf()
+    # Fora do digest: o plano de um usuário muda no painel sem mudar a configuração do
+    # OLS, e o sync (a cada 30 s) leva o valor novo para a fatia.
+    if os.geteuid() == 0 and cgroup_v2():
+        apply_limits(generator.limit_plan)
     if not quiet:
         print("%d vhosts, %d avisos%s." % (len([v for v in server.vhosts if v.ols_name]),
                                           len(config.warnings),
@@ -2172,13 +2424,14 @@ def status_info(settings):
         label += " (stopped)"
     options = dict((k, settings.get(k, DEFAULTS.get(k, "off"))) for k in OPTIONS)
     options["waf_available"] = os.path.exists(os.path.join(LSWS, "modules", "mod_security.so"))
+    options["limits_available"] = cgroup_v2()
     webp = webp_state()
     if webp.get("files"):
         options["webp_stats"] = "%d images in WebP, %s saved (last pass %s)" % (
             webp["files"], human_bytes(webp.get("saved", 0)),
             time.strftime("%Y-%m-%d %H:%M", time.localtime(webp.get("at", 0))))
     return {"mode": mode, "label": label, "running": bool(pid), "pid": pid or 0,
-            "options": options,
+            "options": options, "limits": limits_report(),
             "version": version, "units": units, "front": settings.get("front", ""),
             "port_offset": settings.get("port_offset"), "php": php, "warnings": warnings}
 
@@ -2934,6 +3187,12 @@ OPTIONS = {
     "mem_cache": ("auto", "64M", "256M", "512M"),
     "protection": ("off", "standard", "strict"),
     "waf": ("off", "detect", "block"),
+    "limits": ("on", "off"),
+    "limit_cpu": ("50%", "100%", "200%", "400%", "off"),
+    "limit_mem": ("512M", "1G", "2G", "4G", "off"),
+    "limit_tasks": ("100", "200", "400", "1000", "off"),
+    "limit_io": ("10M", "25M", "50M", "100M", "off"),
+    "limit_iops": ("500", "1000", "2000", "off"),
 }
 
 
@@ -3197,7 +3456,8 @@ def cmd_stats(as_json=True):
     import json
     total, sites, apps, blocked = read_rtreport()
     stats = {"total": total, "sites": sites, "php": apps, "ols_blocked": blocked,
-             "firewall_bans": firewall_bans(), "waf": waf_events(), "time": int(time.time())}
+             "firewall_bans": firewall_bans(), "waf": waf_events(), "users": limits_report(),
+             "time": int(time.time())}
     print(json.dumps(stats, indent=1))
     return 0
 
@@ -3254,6 +3514,9 @@ def cmd_set(settings, key, value):
         except (RuntimeError, OSError) as err:
             print("WAF: %s" % err)
             return 1
+    if key == "limits" and value == "on" and not cgroup_v2():
+        print("limits: este servidor não tem cgroups v2 com systemd.")
+        return 1
     if key == "http3":
         result = hestia_http3_rule(value == "on")
         if result and result[0] != 0:
@@ -3600,6 +3863,33 @@ def cmd_status(settings, as_json=False):
             lines = [l for l in handle.read().splitlines() if l]
         print("avisos: %d (%s)" % (len(lines), path))
     return 0 if pid else 3
+
+
+def cmd_limits(settings, as_json=False):
+    rows = limits_report()
+    if as_json:
+        import json
+        print(json.dumps(rows, indent=1))
+        return 0
+    state = settings.get("limits", DEFAULTS["limits"])
+    print("limits: %s%s" % (state, "" if cgroup_v2() else " (sem cgroups v2: indisponível)"))
+    if not rows:
+        print("nenhum usuário com limites")
+        return 0
+    head = ("usuário", "plano", "CPU", "memória", "tarefas", "disco/s", "IOPS",
+            "CPU usada", "freada", "memória agora", "OOM")
+    table = [head]
+    for r in rows:
+        mark = lambda k: (r[k] or "-") + ("*" if r["from"].get(k) == "package" else "")
+        table.append((r["user"] or str(r["uid"]), r["package"] or "-", mark("cpu"), mark("mem"),
+                      mark("tasks"), mark("io"), mark("iops"),
+                      "%ds" % (r["cpu_usec"] // 1000000), "%ds" % (r["throttled_usec"] // 1000000),
+                      human_bytes(r["memory"]), str(r["oom_kills"])))
+    widths = [max(len(str(row[i])) for row in table) for i in range(len(head))]
+    for row in table:
+        print("  ".join(str(c).ljust(w) for c, w in zip(row, widths)).rstrip())
+    print("* valor do plano do HestiaCP; os demais são os padrões (olsbridge set limit_*)")
+    return 0
 
 
 def analyze(settings):
@@ -4068,6 +4358,8 @@ def cmd_uninstall(settings):
     systemctl("disable", "--now", "olsbridge-webp.timer")
     systemctl("disable", "--now", "olsbridge.service")
     remove_dropins(units)
+    if cgroup_v2():
+        apply_limits({})  # as fatias dos usuários voltam ao padrão do systemd
     for name in ("olsbridge.service", "olsbridge-sync.service", "olsbridge-sync.timer",
                  "olsbridge-webp.service", "olsbridge-webp.timer",
                  "olsbridge-unit@.service"):
@@ -4152,6 +4444,8 @@ def main(argv=None):
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
     sub.add_parser("stats", help="tempo real, bloqueios e WAF, em JSON")
+    limits = sub.add_parser("limits", help="limites e consumo de CPU, memória e disco por usuário")
+    limits.add_argument("--json", action="store_true")
     sub.add_parser("status-html", help="status para a tela Server > web do HestiaCP")
     wafsite = sub.add_parser("waf-site", help="WAF de um site: show, add, delete, mode")
     wafsite.add_argument("action", choices=("show", "add", "delete", "mode"))
@@ -4182,6 +4476,8 @@ def main(argv=None):
     compare.add_argument("--offset", type=int)
     args = parser.parse_args(argv)
     settings = Settings.load()
+    if args.command == "limits":
+        return cmd_limits(settings, args.json)
     if args.command not in ("status", "hestia-integrate", "stats", "hestia-services",
                             "status-html") and \
             not settings.get("apache_conf"):

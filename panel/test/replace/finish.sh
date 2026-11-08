@@ -31,4 +31,6 @@ expect "desinstalado: servidor em :80" nginx "$(server | cut -d/ -f1)"
 expect "PHP de volta ao PHP-FPM" fpm-fcgi "$(get /info.php | cut -d' ' -f1)"
 expect "processo do nginx" sim "$(running nginx)"
 expect "processo do PHP-FPM" sim "$(running php-fpm8.4)"
+expect "fatias dos usuários de volta ao padrão" 0 \
+    "$(ls /etc/systemd/system/user-*.slice.d/60-olsbridge.conf 2>/dev/null | wc -l)"
 exit $status

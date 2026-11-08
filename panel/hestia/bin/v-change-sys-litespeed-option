@@ -15,6 +15,14 @@
 #   protection  off | standard | strict  per-IP limits, reCAPTCHA under attack,
 #                                      WordPress login lockout, fail2ban jails
 #   waf         off | detect | block   ModSecurity with the OWASP Core Rule Set
+#   limits      on | off               CPU, memory and disk limits per user (cgroups v2)
+#   limit_cpu   50% | 100% | 200% | 400% | off   CPU per user (100% = one core)
+#   limit_mem   512M | 1G | 2G | 4G | off        memory per user
+#   limit_tasks 100 | 200 | 400 | 1000 | off     processes and threads per user
+#   limit_io    10M | 25M | 50M | 100M | off     disk read and write per second
+#   limit_iops  500 | 1000 | 2000 | off          disk operations per second
+#               The package's CPU quota, memory and swap limits, when set, win over
+#               these defaults.
 # Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
 
 #----------------------------------------------------------#
@@ -45,6 +53,12 @@ case "$option:$value" in
 	mem_cache:auto | mem_cache:64M | mem_cache:256M | mem_cache:512M) ;;
 	protection:off | protection:standard | protection:strict) ;;
 	waf:off | waf:detect | waf:block) ;;
+	limits:on | limits:off) ;;
+	limit_cpu:50% | limit_cpu:100% | limit_cpu:200% | limit_cpu:400% | limit_cpu:off) ;;
+	limit_mem:512M | limit_mem:1G | limit_mem:2G | limit_mem:4G | limit_mem:off) ;;
+	limit_tasks:100 | limit_tasks:200 | limit_tasks:400 | limit_tasks:1000 | limit_tasks:off) ;;
+	limit_io:10M | limit_io:25M | limit_io:50M | limit_io:100M | limit_io:off) ;;
+	limit_iops:500 | limit_iops:1000 | limit_iops:2000 | limit_iops:off) ;;
 	*) check_result "$E_INVALID" "invalid option or value: $option $value" ;;
 esac
 if [ ! -x "$OLSBRIDGE" ]; then

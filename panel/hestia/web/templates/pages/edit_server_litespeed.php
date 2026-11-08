@@ -164,6 +164,62 @@
 				</div>
 			</details>
 
+			<!-- Resources per customer -->
+			<details class="box-collapse u-mb10">
+				<summary class="box-collapse-header">
+					<i class="fas fa-scale-balanced u-mr10"></i><?= tohtml( _("Resources per customer")) ?>
+				</summary>
+				<div class="box-collapse-content">
+					<p class="u-mb20">
+						<?= tohtml( _("Each user's PHP runs in the user's own control group (cgroups v2, like CloudLinux LVE), together with the user's SSH and cron. One site cannot take the CPU, memory or disk of the others: when the server is busy, every user gets an equal share, and no user goes above the limits below. A package's CPU quota, memory limit and swap limit, when set (Resource limits in the server settings), win over these defaults for the users of that package.")) ?>
+					</p>
+					<?php if (!$olsb_options["limits_available"]) { ?>
+						<p class="u-mb20"><strong><?= tohtml( _("Unavailable: this server does not have cgroups v2 with systemd.")) ?></strong></p>
+					<?php } ?>
+					<div class="u-mb20">
+						<label for="v_limits" class="form-label"><?= tohtml( _("Limits per customer")) ?></label>
+						<select class="form-select" name="v_limits" id="v_limits">
+							<option value="on" <?= $olsb_options["limits"] == "on" ? "selected" : "" ?>><?= tohtml( _("On")) ?></option>
+							<option value="off" <?= $olsb_options["limits"] == "off" ? "selected" : "" ?>><?= tohtml( _("Off")) ?></option>
+						</select>
+					</div>
+					<?php
+					$olsb_limit_fields = [
+						"limit_cpu" => [_("CPU per user"), ["50%" => _("half a core"), "100%" => _("1 core"), "200%" => _("2 cores"), "400%" => _("4 cores")], _("Busy loops, image processing and heavy plugins of one user stop at this share.")],
+						"limit_mem" => [_("Memory per user"), ["512M" => "512 MB", "1G" => "1 GB", "2G" => "2 GB", "4G" => "4 GB"], _("All PHP processes of the user together. Above it, the user's largest process is ended (the request gets an error); swap is limited to a quarter of it.")],
+						"limit_tasks" => [_("Processes per user"), ["100" => "100", "200" => "200", "400" => "400", "1000" => "1000"], _("Processes and threads, against fork bombs. Each site uses up to pm.max_children PHP processes, plus one.")],
+						"limit_io" => [_("Disk throughput per user"), ["10M" => "10 MB/s", "25M" => "25 MB/s", "50M" => "50 MB/s", "100M" => "100 MB/s"], _("Reads and writes on the disk of /home, each. Files already in memory do not count.")],
+						"limit_iops" => [_("Disk operations per user"), ["500" => "500/s", "1000" => "1000/s", "2000" => "2000/s"], _("Reads and writes per second, each.")],
+					];
+					foreach ($olsb_limit_fields as $olsb_key => [$olsb_label, $olsb_values, $olsb_help]) { ?>
+						<div class="u-mb20">
+							<label for="v_<?= $olsb_key ?>" class="form-label"><?= tohtml($olsb_label) ?></label>
+							<select class="form-select" name="v_<?= $olsb_key ?>" id="v_<?= $olsb_key ?>">
+								<?php foreach ($olsb_values as $olsb_value => $olsb_text) { ?>
+									<option value="<?= tohtml($olsb_value) ?>" <?= $olsb_options[$olsb_key] == $olsb_value ? "selected" : "" ?>><?= tohtml($olsb_text) ?></option>
+								<?php } ?>
+								<option value="off" <?= $olsb_options[$olsb_key] == "off" ? "selected" : "" ?>><?= tohtml( _("No limit")) ?></option>
+							</select>
+							<small class="form-text"><?= tohtml($olsb_help) ?></small>
+						</div>
+					<?php } ?>
+					<?php if (!empty($olsb_limits)) { ?>
+						<p class="form-label u-mb10"><?= tohtml( _("Users")) ?> <span class="u-ml10" id="olsb-users-updated"></span></p>
+						<div class="units-table u-mb10" id="olsb-users">
+							<?php foreach ($olsb_limits as $olsb_row) { ?>
+								<div class="units-table-row">
+									<div class="units-table-cell"><strong><?= tohtml($olsb_row["user"]) ?></strong> <?= tohtml($olsb_row["package"]) ?></div>
+									<div class="units-table-cell">CPU <?= tohtml($olsb_row["cpu"] ?? "-") ?>, <?= tohtml( _("memory")) ?> <?= tohtml($olsb_row["mem"] ?? "-") ?></div>
+									<div class="units-table-cell"><?= tohtml(round($olsb_row["memory"] / 1048576)) ?> MB</div>
+									<div class="units-table-cell">OOM <?= tohtml($olsb_row["oom_kills"]) ?></div>
+								</div>
+							<?php } ?>
+						</div>
+						<small class="form-text"><?= tohtml( _("CPU now, CPU time held back by the limit since the user's group started, memory in use, and processes ended for lack of memory. Values with * come from the user's package.")) ?></small>
+					<?php } ?>
+				</div>
+			</details>
+
 			<!-- Security -->
 			<details class="box-collapse u-mb10" open>
 				<summary class="box-collapse-header">
@@ -311,6 +367,8 @@
 		unban: <?= json_encode(_("Unban")) ?>, none: <?= json_encode(_("none")) ?>,
 		events: <?= json_encode(_("events")) ?>, blocked: <?= json_encode(_("blocked")) ?>,
 		updated: <?= json_encode(_("updated")) ?>,
+		held: <?= json_encode(_("held back")) ?>, memory: <?= json_encode(_("memory")) ?>,
+		tasks: <?= json_encode(_("processes")) ?>,
 	};
 	async function refresh() {
 		let d;
@@ -334,7 +392,22 @@
 		$("olsb-blocked-count").textContent = "(" + (d.firewall_bans.length + d.ols_blocked.length) + ")";
 		$("olsb-wafrules").innerHTML = d.waf.rules.map((r) => row([esc(r.name), num(r.count)])).concat(d.waf.ips.map((r) => row([esc(r.name), num(r.count)]))).join("") || row([labels.none]);
 		$("olsb-updated").textContent = labels.updated + " " + new Date().toLocaleTimeString();
+		// CPU per user: difference of the group's CPU time between two refreshes.
+		if ($("olsb-users") && d.users) {
+			const mark = (u, k) => esc(u[k] || "-") + (u.from && u.from[k] === "package" ? "*" : "");
+			$("olsb-users").innerHTML = d.users.map((u) => {
+				const prev = cpuPrev[u.uid];
+				const pct = prev && d.time > prev.time ? Math.round((u.cpu_usec - prev.usec) / 10000 / (d.time - prev.time)) + "%" : "-";
+				cpuPrev[u.uid] = {usec: u.cpu_usec, time: d.time};
+				return row(["<strong>" + esc(u.user) + "</strong> " + esc(u.package || ""),
+					"CPU " + pct + " / " + mark(u, "cpu") + ", " + labels.held + " " + num(Math.round(u.throttled_usec / 1e6)) + " s",
+					labels.memory + " " + num(Math.round(u.memory / 1048576)) + " MB / " + mark(u, "mem"),
+					num(u.tasks_now) + " / " + mark(u, "tasks") + " " + labels.tasks + ", OOM " + num(u.oom_kills)]);
+			}).join("") || row([labels.none]);
+			$("olsb-users-updated").textContent = labels.updated + " " + new Date().toLocaleTimeString();
+		}
 	}
+	const cpuPrev = {};
 	document.addEventListener("click", (e) => {
 		const b = e.target.closest("button[data-ip]");
 		if (!b) return;
