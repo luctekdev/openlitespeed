@@ -3,7 +3,8 @@
 Faz o OpenLiteSpeed deste fork atender os sites que o HestiaCP ou o DirectAdmin configuram para o Apache, sem mudar
 nada no painel. No modo `replace`, o OLS também assume o nginx que fica na frente e o PHP-FPM: os três serviços
 continuam existindo para o painel, mas quem atende é o OLS, com o lsphp da mesma versão de cada pool. Plano e estado:
-[`doc/htaccess-compat/PAINEL.md`](../doc/htaccess-compat/PAINEL.md).
+[`doc/htaccess-compat/PAINEL.md`](../doc/htaccess-compat/PAINEL.md). O que está pronto para produção e o que falta:
+[`PRODUCAO.md`](PRODUCAO.md).
 
 ## Instalação num servidor
 
@@ -208,11 +209,17 @@ As opções valem para o servidor inteiro. Mudam pela página do OpenLiteSpeed n
 |---|---|---|
 | `cache` | `on` | LSCache no servidor. Guarda só o que a aplicação pede: no WordPress, com o plugin LiteSpeed Cache. Quem não pede não é afetado |
 | `webp` | `on` | PNG e JPEG saem em WebP para o navegador que aceita (abaixo) |
+| `php_timeout` | `300` | Tempo máximo, em segundos de relógio, de uma requisição PHP (30, 60, 120, 300, 600). Passou, sai 503 e o processo é liberado, como o `request_terminate_timeout` do PHP-FPM. Pega o script parado esperando uma API, que o `max_execution_time` (só CPU) não conta |
+| `php_idle` | `1800` | Segundos sem visita até o lsphp do site sair (300, 1800, 3600 ou `off`). Cada site com PHP ativo ocupa uns 50 MB com o OPcache; volta sozinho na próxima visita |
+| `mem_cache` | `auto` | Cache de estáticos em memória, já comprimidos: `auto` usa 1/32 da RAM (de 32 MB a 256 MB), ou 64M, 256M, 512M |
 | `http3` | `off` | HTTP/3 (QUIC). Ligar abre UDP 443 no firewall do HestiaCP (regra HTTP3) |
 | `protection` | `standard` | `off`, `standard` ou `strict`: conexões por IP, reCAPTCHA sob ataque, login do WordPress e jails do fail2ban |
 | `waf` | `off` | `off`, `detect` ou `block`: ModSecurity com o OWASP CRS 4 e as exclusões do WordPress. Aceita PUT, PATCH e DELETE (APIs REST, Laravel), que o CRS sozinho barra |
 
-Fixos, sem opção: brotli e gzip com cache em memória dos estáticos comprimidos, cache de sessão TLS e tickets,
+Fixos, sem opção: links simbólicos só seguidos quando o dono do link é o dono do destino (como o
+`SymLinksIfOwnerMatch` do Apache: um cliente não serve o arquivo de outro), pastas de sistema negadas
+(`/etc`, `/proc`, `/root`, configuração do OLS e do HestiaCP), logs reabertos quando o logrotate do HestiaCP os gira,
+brotli e gzip com cache em memória dos estáticos comprimidos, cache de sessão TLS e tickets,
 OCSP stapling, `expires` máximo nos estáticos como o `expires max` do nginx do HestiaCP. O `expires` do OLS vale
 também para o que o PHP gera, por isso cobre só tipos de arquivo estático (imagem, fonte, CSS, JS, PDF...), nunca
 HTML, JSON, XML ou texto.

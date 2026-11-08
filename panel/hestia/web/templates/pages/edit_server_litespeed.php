@@ -124,6 +124,46 @@
 				</div>
 			</details>
 
+			<!-- PHP and resources -->
+			<details class="box-collapse u-mb10">
+				<summary class="box-collapse-header">
+					<i class="fas fa-microchip u-mr10"></i><?= tohtml( _("PHP and resources")) ?>
+				</summary>
+				<div class="box-collapse-content">
+					<div class="u-mb20">
+						<label for="v_php_timeout" class="form-label"><?= tohtml( _("PHP request time limit")) ?></label>
+						<select class="form-select" name="v_php_timeout" id="v_php_timeout">
+							<option value="30" <?= $olsb_options["php_timeout"] == "30" ? "selected" : "" ?>><?= tohtml( _("30 seconds")) ?></option>
+							<option value="60" <?= $olsb_options["php_timeout"] == "60" ? "selected" : "" ?>><?= tohtml( _("60 seconds")) ?></option>
+							<option value="120" <?= $olsb_options["php_timeout"] == "120" ? "selected" : "" ?>><?= tohtml( _("2 minutes")) ?></option>
+							<option value="300" <?= $olsb_options["php_timeout"] == "300" ? "selected" : "" ?>><?= tohtml( _("5 minutes")) ?></option>
+							<option value="600" <?= $olsb_options["php_timeout"] == "600" ? "selected" : "" ?>><?= tohtml( _("10 minutes")) ?></option>
+						</select>
+						<small class="form-text"><?= tohtml( _("Longest time, in real seconds, a PHP request may run before it is stopped (503), like request_terminate_timeout in PHP-FPM. It frees PHP processes held by stuck scripts, such as one waiting on an external API, which max_execution_time does not count. Raise it for long imports, backups or reports.")) ?></small>
+					</div>
+					<div class="u-mb20">
+						<label for="v_php_idle" class="form-label"><?= tohtml( _("Idle PHP processes")) ?></label>
+						<select class="form-select" name="v_php_idle" id="v_php_idle">
+							<option value="300" <?= $olsb_options["php_idle"] == "300" ? "selected" : "" ?>><?= tohtml( _("End after 5 minutes idle")) ?></option>
+							<option value="1800" <?= $olsb_options["php_idle"] == "1800" ? "selected" : "" ?>><?= tohtml( _("End after 30 minutes idle")) ?></option>
+							<option value="3600" <?= $olsb_options["php_idle"] == "3600" ? "selected" : "" ?>><?= tohtml( _("End after 1 hour idle")) ?></option>
+							<option value="off" <?= $olsb_options["php_idle"] == "off" ? "selected" : "" ?>><?= tohtml( _("Keep running")) ?></option>
+						</select>
+						<small class="form-text"><?= tohtml( _("Each site keeps a PHP process with its OPcache (about 50 MB). Ending it when the site is idle frees memory on servers with many sites; the next visit starts it again, a little slower.")) ?></small>
+					</div>
+					<div class="u-mb10">
+						<label for="v_mem_cache" class="form-label"><?= tohtml( _("Static file memory cache")) ?></label>
+						<select class="form-select" name="v_mem_cache" id="v_mem_cache">
+							<option value="auto" <?= $olsb_options["mem_cache"] == "auto" ? "selected" : "" ?>><?= tohtml( _("Automatic (1/32 of the RAM)")) ?></option>
+							<option value="64M" <?= $olsb_options["mem_cache"] == "64M" ? "selected" : "" ?>><?= tohtml( _("64 MB")) ?></option>
+							<option value="256M" <?= $olsb_options["mem_cache"] == "256M" ? "selected" : "" ?>><?= tohtml( _("256 MB")) ?></option>
+							<option value="512M" <?= $olsb_options["mem_cache"] == "512M" ? "selected" : "" ?>><?= tohtml( _("512 MB")) ?></option>
+						</select>
+						<small class="form-text"><?= tohtml( _("Small images, CSS and JavaScript are served from memory, already compressed.")) ?></small>
+					</div>
+				</div>
+			</details>
+
 			<!-- Security -->
 			<details class="box-collapse u-mb10" open>
 				<summary class="box-collapse-header">

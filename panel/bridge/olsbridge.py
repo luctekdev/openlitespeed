@@ -57,6 +57,16 @@ DEFAULTS = {
     # PNG e JPEG em WebP para quem aceita: uma cópia imagem.png.webp ao lado de cada
     # imagem, feita com o usuário dono do site (olsbridge webp, timer de 10 minutos).
     "webp": "on",
+    # Tempo máximo, em segundos de relógio, de uma requisição PHP: passou, o lsphp encerra
+    # o processo (503), como o request_terminate_timeout do PHP-FPM. Um script parado
+    # esperando uma API não conta no max_execution_time (só CPU) e prendia os processos
+    # do site.
+    "php_timeout": "300",
+    # Segundos sem requisição até o lsphp de um site sair (cada um ocupa uns 50 MB com o
+    # OPcache); off mantém para sempre. Volta sozinho na próxima requisição.
+    "php_idle": "1800",
+    # Cache de arquivos estáticos em memória: auto usa 1/32 da RAM (32 MB a 256 MB).
+    "mem_cache": "auto",
     # off, standard ou strict: limite por IP, reCAPTCHA sob ataque e login do WordPress.
     "protection": "standard",
     # off, detect (só registra) ou block: ModSecurity com as regras OWASP CRS.
@@ -130,9 +140,11 @@ class Settings(dict):
         return values
 
     def save(self, path=SETTINGS):
+        # Todas as opções do painel (OPTIONS): uma que faltasse aqui voltava ao padrão no
+        # próximo sync, como acontecia com webp.
         keys = ["mode", "port_offset", "apache_conf", "apache_root", "apache_ctl", "service",
-                "php_max_conns", "panel", "php", "front", "front_service", "port_map", "units",
-                "cache", "http3", "protection", "waf"]
+                "php_max_conns", "panel", "php", "front", "front_service", "port_map", "units"]
+        keys += [k for k in OPTIONS if k not in keys]
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("# Gerado por olsbridge install; pode ser editado.\n")
@@ -1046,6 +1058,17 @@ def log_format(server, fmt):
     return server.formats.get(fmt, fmt)
 
 
+def mem_cache_mb(value):
+    """Tamanho do cache de estáticos em memória, em MB."""
+    if value and value != "auto" and value[:-1].isdigit():
+        return int(value[:-1])
+    try:
+        ram = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // (1 << 20)
+    except (ValueError, OSError, AttributeError):
+        ram = 2048
+    return max(32, min(256, ram // 32))
+
+
 class Generator(object):
     def __init__(self, server, settings, warnings):
         self.server = server
@@ -1066,6 +1089,8 @@ class Generator(object):
         self.pool_of = {}        # processador lsapi -> pool do PHP-FPM
         self.extra_files = {}    # php/<processador>/pool.ini, acme/<vhost>/index.php
         self.webp = settings.get("webp", DEFAULTS["webp"]) == "on"
+        self.php_timeout = settings.get("php_timeout", DEFAULTS["php_timeout"])
+        self.mem_cache = mem_cache_mb(settings.get("mem_cache", DEFAULTS["mem_cache"]))
 
     def processor(self, address):
         if address == "acme" and address not in self.processors:
@@ -1139,12 +1164,20 @@ class Generator(object):
         # Filhos que ficam vivos e aceitam conexões direto do socket, como os do PHP-FPM.
         # Sem isto, com uma conexão por requisição, cada requisição criava um processo.
         env.append("LSAPI_AVOID_FORK=200M")
+        idle = self.settings.get("php_idle", DEFAULTS["php_idle"])
+        if pool is not None and idle != "off":
+            # O processo pai também sai quando o site fica ocioso (os filhos já saíam).
+            env.append("LSAPI_PGRP_MAX_IDLE=%s" % idle)
+        if pool is not None:
+            # O lsphp só encerra a requisição na 3ª verificação do limite (medido: 30 s
+            # cortava em 93 s, 60 s em 183 s); um terço faz o corte cair no valor da opção.
+            env.append("LSAPI_MAX_PROCESS_TIME=%d" % max(1, int(self.php_timeout) // 3))
         out = ["extprocessor %s {" % name,
                "    type                  lsapi",
                "    address               uds://tmp/lshttpd/%s.sock" % name,
                "    maxConns              %d" % children]
         out += ["    env                   %s" % e for e in env]
-        out += ["    initTimeout           60",
+        out += ["    initTimeout           %s" % self.php_timeout,
                 "    retryTimeout          0",
                 # Cada processo do OLS guarda as suas conexões, e uma conexão aberta
                 # prende um filho do lsphp: com 8 processos e um pool de 2 filhos, as
@@ -1335,9 +1368,9 @@ class Generator(object):
                "    compressibleTypes     default",
                # Arquivos pequenos ficam em memória, os médios mapeados.
                "    maxCachedFileSize     4096",
-               "    totalInMemCacheSize   20M",
+               "    totalInMemCacheSize   %dM" % self.mem_cache,
                "    maxMMapFileSize       256K",
-               "    totalMMapCacheSize    40M",
+               "    totalMMapCacheSize    %dM" % min(1024, self.mem_cache * 2),
                "    useSendfile           1",
                "    sslSessionCache       1",
                "    sslSessionCacheSize   1000000",
@@ -1362,11 +1395,26 @@ class Generator(object):
                "    procHardLimit         450",
                "}",
                "",
+               # Hospedagem compartilhada: um cliente não serve o arquivo de outro por um
+               # link simbólico (o OLS lê os estáticos como www-data, que lê todos os
+               # sites). Segue o link só se o dono do link é o dono do destino, como o
+               # SymLinksIfOwnerMatch do Apache; o storage do Laravel continua valendo.
                "fileAccessControl {",
-               "    followSymbolLink      1",
-               "    checkSymbolLink       0",
+               "    followSymbolLink      2",
+               "    checkSymbolLink       1",
                "    requiredPermissionMask 000",
                "    restrictedPermissionMask 000",
+               "}",
+               "",
+               "accessDenyDir {",
+               "    dir                   /",
+               "    dir                   /etc/*",
+               "    dir                   /dev/*",
+               "    dir                   /proc/*",
+               "    dir                   /root/*",
+               "    dir                   %s/conf/*" % LSWS,
+               "    dir                   %s/admin/conf/*" % LSWS,
+               "    dir                   /usr/local/hestia/*",
                "}",
                ""]
         allow = ["ALL"]
@@ -1410,7 +1458,7 @@ class Generator(object):
                     "    type                  fcgi",
                     "    address               %s" % address,
                     "    maxConns              %s" % conns,
-                    "    initTimeout           60",
+                    "    initTimeout           %s" % self.php_timeout,
                     "    retryTimeout          0",
                     # Como o mod_proxy_fcgi: uma conexão por requisição. Persistente,
                     # cada conexão prende um processo do pool (o www do HestiaCP tem 4).
@@ -2031,6 +2079,42 @@ def graceful_restart(pid):
     return False
 
 
+ROTATED_LOG = re.compile(r"\.(?:log|bytes)(?:\.\d+|-\d{8})?(?: \(deleted\))?$")
+
+
+def logs_rotated():
+    """Algum processo do OLS escreve num log que o logrotate girou (renomeado para .1
+    ou apagado). O logrotate do HestiaCP só faz reload do apache2, e o OLS só reabre os
+    logs num restart: sem isto, os logs dos sites (e a banda do painel, contada no
+    .bytes) iam para o arquivo girado até a configuração mudar."""
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            exe = os.path.basename(os.readlink("/proc/%s/exe" % entry))
+        except OSError:
+            continue
+        if exe not in ("openlitespeed", "lshttpd", "litespeed"):
+            continue
+        fds = "/proc/%s/fd" % entry
+        try:
+            names = os.listdir(fds)
+        except OSError:
+            continue
+        for fd in names:
+            try:
+                target = os.readlink(os.path.join(fds, fd))
+            except OSError:
+                continue
+            if not target.startswith("/") or not ROTATED_LOG.search(target):
+                continue
+            if target.endswith(" (deleted)") or re.search(r"(?:\.\d+|-\d{8})$", target):
+                if "/modsec_audit.log" in target:
+                    continue  # girado com copytruncate, o arquivo é o mesmo
+                return True
+    return False
+
+
 def current_pid(seconds=10):
     """PID do processo principal; no meio de um restart gracioso, espera o novo."""
     for _ in range(seconds * 10):
@@ -2047,7 +2131,7 @@ def cmd_reload(settings, only_if_changed=False, quiet=False):
         pid = current_pid()
         if not pid:
             return cmd_start(settings)
-        if changed or not only_if_changed:
+        if changed or not only_if_changed or logs_rotated():
             graceful_restart(pid)  # novas conexões já usam a config nova
         if changed:
             restart_lsphp()  # um pool pode ter mudado de usuário, limites ou valores
@@ -2845,6 +2929,9 @@ OPTIONS = {
     "cache": ("on", "off"),
     "http3": ("on", "off"),
     "webp": ("on", "off"),
+    "php_timeout": ("30", "60", "120", "300", "600"),
+    "php_idle": ("off", "300", "1800", "3600"),
+    "mem_cache": ("auto", "64M", "256M", "512M"),
     "protection": ("off", "standard", "strict"),
     "waf": ("off", "detect", "block"),
 }
@@ -3115,6 +3202,44 @@ def cmd_stats(as_json=True):
     return 0
 
 
+def cmd_status_html(settings):
+    """O status do servidor web na tela do HestiaCP (Server > web), que mostrava o
+    server-status do Apache e o do nginx, parados no modo replace."""
+    from html import escape
+    info = status_info(settings)
+    total, sites, apps, _blocked = read_rtreport()
+
+    def row(cells, tag="td"):
+        return "<tr>%s</tr>" % "".join("<%s>%s</%s>" % (tag, escape(str(c)), tag)
+                                       for c in cells)
+
+    out = ["<h2>OPENLITESPEED STATUS</h2>",
+           "<p>%s &middot; %s &middot; %s</p>" % (
+               escape(info["version"]), escape(info["label"]),
+               '<a href="/edit/server/litespeed/">OpenLiteSpeed</a>')]
+    if total:
+        out += ['<table border="1" cellpadding="4">',
+                row(["Uptime", "Connections", "SSL", "Requests/s", "Total requests",
+                     "Cache hits %"], "th"),
+                row([total.get("uptime", ""), total.get("conns", 0), total.get("ssl_conns", 0),
+                     total.get("req_per_sec", 0), total.get("total_reqs", 0),
+                     total.get("cache_ratio", 0)]), "</table><br>"]
+    if sites:
+        out += ['<table border="1" cellpadding="4">',
+                row(["Domain", "Requests/s", "Total requests", "Cache hits", "Processing"], "th")]
+        out += [row([x["domain"], x["req_per_sec"], x["total_reqs"], x["cache_hits"],
+                     x["processing"]]) for x in sites]
+        out.append("</table><br>")
+    if apps:
+        out += ['<table border="1" cellpadding="4">',
+                row(["PHP (lsphp)", "In use", "Idle", "Waiting", "Requests/s", "Total"], "th")]
+        out += [row([a["name"], a["in_use"], a["idle"], a["waiting"], a["req_per_sec"],
+                     a["total_reqs"]]) for a in apps]
+        out.append("</table>")
+    print("\n".join(out))
+    return 0
+
+
 def cmd_set(settings, key, value):
     if key not in OPTIONS or value not in OPTIONS[key]:
         print("opções: %s" % "; ".join("%s=%s" % (k, "|".join(v)) for k, v in OPTIONS.items()))
@@ -3215,6 +3340,14 @@ if [ -x %s/bin/olsbridge ]; then
 fi
 # olsbridge:end
 """ % (LSWS, LSWS)
+# Server > web: o status do OLS no lugar do server-status do Apache e do nginx.
+HESTIA_WEB_STATUS = """# olsbridge:begin
+if [ -x %s/bin/olsbridge ] && %s/bin/olsbridge status --json 2>/dev/null | grep -q '"mode": "replace"'; then
+\t%s/bin/olsbridge status-html
+\texit
+fi
+# olsbridge:end
+""" % (LSWS, LSWS, LSWS)
 # (arquivo, âncora, bloco inserido antes da âncora)
 HESTIA_PATCHES = [
     ("web/templates/pages/edit_server.php", HESTIA_ANCHOR, HESTIA_ROW),
@@ -3223,6 +3356,8 @@ HESTIA_PATCHES = [
     ("web/templates/pages/list_services.php", "$cpu = $data[$key]['CPU'] / 10;",
      HESTIA_SERVICES_ROW),
     ("bin/v-list-sys-services", "# Listing data\n", HESTIA_SERVICES_DATA),
+    ("bin/v-list-sys-web-status", "if [ \"$PROXY_SYSTEM\" = 'nginx' ]; then",
+     HESTIA_WEB_STATUS),
 ]
 MARKERS = (("<!-- olsbridge:begin -->", "<!-- olsbridge:end -->"),
            ("// olsbridge:begin", "// olsbridge:end"),
@@ -3997,7 +4132,7 @@ def cmd_unit_reload(settings, unit):
         if not pid:
             systemctl("start", "--no-block", "olsbridge.service")
             return 0
-        if changed:
+        if changed or logs_rotated():
             graceful_restart(pid)
         match = re.match(r"^php(\d+\.\d+)-fpm$", unit)
         if match:
@@ -4017,6 +4152,7 @@ def main(argv=None):
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
     sub.add_parser("stats", help="tempo real, bloqueios e WAF, em JSON")
+    sub.add_parser("status-html", help="status para a tela Server > web do HestiaCP")
     wafsite = sub.add_parser("waf-site", help="WAF de um site: show, add, delete, mode")
     wafsite.add_argument("action", choices=("show", "add", "delete", "mode"))
     wafsite.add_argument("domain")
@@ -4046,7 +4182,8 @@ def main(argv=None):
     compare.add_argument("--offset", type=int)
     args = parser.parse_args(argv)
     settings = Settings.load()
-    if args.command not in ("status", "hestia-integrate", "stats", "hestia-services") and \
+    if args.command not in ("status", "hestia-integrate", "stats", "hestia-services",
+                            "status-html") and \
             not settings.get("apache_conf"):
         print("Configuração do Apache não encontrada.")
         return 1
@@ -4088,6 +4225,8 @@ def main(argv=None):
         return cmd_set(settings, args.key, args.value)
     if args.command == "stats":
         return cmd_stats()
+    if args.command == "status-html":
+        return cmd_status_html(settings)
     if args.command == "webp":
         return cmd_webp(settings, args.budget)
     if args.command in ("waf-site", "waf-log"):

@@ -82,6 +82,11 @@ sed -e "s/%ip%/$IP/g" -e "s/%proxy_port%/80/g" -e "s/%web_port%/8080/g" \
     /test/fixtures/nginx.tpl > /etc/nginx/conf.d/domains/alpha.test.conf
 sed -i "s/^    ServerName alpha.test$/    ServerName alpha.test\n    ServerAlias www.alpha.test/" \
     /etc/apache2/sites-enabled/alpha.test.conf
+# Logs do domínio como no HestiaCP: o .bytes é a banda que o painel conta, e o logrotate
+# do HestiaCP gira os dois (prod.sh).
+echo 'LogFormat "%O" bytes' > /etc/apache2/conf-enabled/hestia-bytes.conf
+sed -i "s|^    DocumentRoot $D/public_html$|&\n    CustomLog /var/log/apache2/domains/alpha.test.log combined\n    CustomLog /var/log/apache2/domains/alpha.test.bytes bytes|" \
+    /etc/apache2/sites-enabled/alpha.test.conf
 
 # Um segundo site, só estático, para o WAF por site (waf.sh).
 E=/home/bob/web/beta.test

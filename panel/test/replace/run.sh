@@ -57,6 +57,7 @@ sleep 2
 expect "bloqueio some com o restart" 200 "$(get_code "$client")"
 docker rm -f "$client" >/dev/null
 
+docker exec "$name" sh /test/prod.sh || status=1
 docker exec "$name" sh /test/waf.sh || status=1
 docker exec "$name" sh /test/finish.sh || status=1
 exit $status

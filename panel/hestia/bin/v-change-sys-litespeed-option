@@ -9,6 +9,9 @@
 #   cache       on | off               LSCache for the applications that ask for it
 #   http3       on | off               HTTP/3 (QUIC); opens or closes UDP 443 in the firewall
 #   webp        on | off               WebP copies of PNG/JPEG for browsers that accept them
+#   php_timeout 30 | 60 | 120 | 300 | 600  longest run of a PHP request, in seconds
+#   php_idle    off | 300 | 1800 | 3600  seconds before an idle site's lsphp exits
+#   mem_cache   auto | 64M | 256M | 512M  in-memory cache of static files
 #   protection  off | standard | strict  per-IP limits, reCAPTCHA under attack,
 #                                      WordPress login lockout, fail2ban jails
 #   waf         off | detect | block   ModSecurity with the OWASP Core Rule Set
@@ -37,6 +40,9 @@ OLSBRIDGE=/usr/local/lsws/bin/olsbridge
 check_args '2' "$#" 'OPTION VALUE'
 case "$option:$value" in
 	cache:on | cache:off | http3:on | http3:off | webp:on | webp:off) ;;
+	php_timeout:30 | php_timeout:60 | php_timeout:120 | php_timeout:300 | php_timeout:600) ;;
+	php_idle:off | php_idle:300 | php_idle:1800 | php_idle:3600) ;;
+	mem_cache:auto | mem_cache:64M | mem_cache:256M | mem_cache:512M) ;;
 	protection:off | protection:standard | protection:strict) ;;
 	waf:off | waf:detect | waf:block) ;;
 	*) check_result "$E_INVALID" "invalid option or value: $option $value" ;;
