@@ -31,8 +31,15 @@ tempo de uso real (abaixo). O isolamento de recursos por cliente, que faltava, e
 - **Pouco tempo de uso real.** O itzvpc2 roda assim desde 2026-11-07, com sites de teste. Recomendado: piloto de 2 a
   4 semanas num servidor com clientes reais, com monitoramento externo (uptime e tempo de resposta), antes de migrar
   os demais.
-- **Fork do OpenLiteSpeed.** Correções de segurança do OLS original precisam ser trazidas para o fork e o binário
-  recompilado. Três correções nossas estão como PRs no projeto original (549, 550, 551).
+- **Manutenção das dependências.** Conferido em 2026-11-08: o fork está na última versão do OLS (1.9.4, sem commits
+  novos no original), o CRS na 4.30.0 e as exclusões do WordPress na 1.2.0. A libmodsecurity do Ubuntu parou na
+  3.0.14, sem as correções da 3.0.15 à 3.0.17 (estouros de memória no multipart e no `hex_decode`, desvios do WAF);
+  o pacote agora traz a 3.0.17, compilada para o Ubuntu 24.04 e para o 26.04, em `/usr/local/lsws/modsec/lib`. O
+  `error.log` do OLS ainda anuncia "libmodsecurity v3.0.15": é texto fixo do código original. A versão carregada se
+  vê em `grep libmodsecurity /proc/$(cat /tmp/lshttpd/lshttpd.pid)/maps`. A cada nova versão do OLS, do CRS ou da
+  libmodsecurity: trazer, recompilar (`htaccess-compat/docker/ols.Dockerfile`, versão e SHA-256 no topo), rodar
+  `htaccess-compat/compare/all.sh` e `panel/test/replace/run.sh` e atualizar com `install.sh --upgrade`. Quatro
+  correções nossas aguardam revisão no projeto original (PRs 548 a 551).
 - **DirectAdmin** não foi testado.
 - **Saída para a internet bloqueada.** Na subida, o OLS baixa a lista de IPs do QUIC.cloud e espera até 10 s se não
   conseguir; a instalação já espera 30 s por isso.

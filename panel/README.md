@@ -215,7 +215,7 @@ As opções valem para o servidor inteiro. Mudam pela página do OpenLiteSpeed n
 | `mem_cache` | `auto` | Cache de estáticos em memória, já comprimidos: `auto` usa 1/32 da RAM (de 32 MB a 256 MB), ou 64M, 256M, 512M |
 | `http3` | `off` | HTTP/3 (QUIC). Ligar abre UDP 443 no firewall do HestiaCP (regra HTTP3) |
 | `protection` | `standard` | `off`, `standard` ou `strict`: conexões por IP, reCAPTCHA sob ataque, login do WordPress e jails do fail2ban |
-| `waf` | `off` | `off`, `detect` ou `block`: ModSecurity com o OWASP CRS 4 e as exclusões do WordPress. Aceita PUT, PATCH e DELETE (APIs REST, Laravel), que o CRS sozinho barra |
+| `waf` | `off` | `off`, `detect` ou `block`: ModSecurity (libmodsecurity 3.0.17, no pacote) com o OWASP CRS 4 e as exclusões do WordPress. Aceita PUT, PATCH e DELETE (APIs REST, Laravel), que o CRS sozinho barra |
 | `limits` | `on` | Recursos por cliente (abaixo): o PHP de cada usuário com limite de CPU, memória, processos e disco |
 | `limit_cpu` | `200%` | CPU por usuário: `50%`, `100%` (um núcleo), `200%`, `400%` ou `off` |
 | `limit_mem` | `2G` | Memória por usuário: `512M`, `1G`, `2G`, `4G` ou `off`. Swap até um quarto disso |
