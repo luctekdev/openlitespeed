@@ -6,6 +6,10 @@
 # build.sh altera arquivos do código-fonte (CMakeLists etc.). Por isso ele roda
 # sempre sobre a cópia dentro da imagem, nunca sobre o repositório.
 
+# libmodsecurity do WAF (estágios build e modsec-ubuntu26.04).
+ARG MODSEC_VERSION=3.0.17
+ARG MODSEC_SHA256=f283b33d5c21130fd3a15c84a93a1abe12bd1949edaf44288b12af571b671a50
+
 FROM ubuntu:24.04 AS deps
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -48,8 +52,8 @@ RUN ./build.sh -o OFF -l OFF -p OFF && test -x build/src/openlitespeed
 # transformações. Fica em /usr/local/lsws/modsec, e o módulo a acha pelo RPATH; as
 # bibliotecas que ela usa (pcre2, libxml2, yajl, curl) são as do pacote
 # libmodsecurity3t64, que a ponte instala ao ligar o WAF.
-ARG MODSEC_VERSION=3.0.17
-ARG MODSEC_SHA256=f283b33d5c21130fd3a15c84a93a1abe12bd1949edaf44288b12af571b671a50
+ARG MODSEC_VERSION
+ARG MODSEC_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpcre2-dev libxml2-dev libyajl-dev libcurl4-openssl-dev pkg-config \
     && curl -fsSL -o /tmp/modsec.tar.gz "https://github.com/owasp-modsecurity/ModSecurity/releases/download/v${MODSEC_VERSION}/modsecurity-v${MODSEC_VERSION}.tar.gz" \
@@ -60,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
            --without-lua --without-maxmind --without-ssdeep --without-lmdb >/dev/null \
     && make -j"$(nproc)" >/dev/null && make install >/dev/null \
     && rm -rf /tmp/modsec.tar.gz "/tmp/modsecurity-v${MODSEC_VERSION}" /usr/local/lsws/modsec/lib/*.a \
+              /usr/local/lsws/modsec/lib/*.la \
     && cd /work/openlitespeed \
     && PKG_CONFIG_PATH=/usr/local/lsws/modsec/lib/pkgconfig \
        cmake -S . -B build-modsec -DCMAKE_BUILD_TYPE=Release -DMOD_SECURITY=ON \
@@ -92,9 +97,33 @@ RUN git config core.symlinks true \
     && cmake --build build-test -j"$(nproc)" -- -k
 CMD ["ctest", "--test-dir", "build-test", "--output-on-failure", "--timeout", "120"]
 
+# A mesma libmodsecurity compilada no Ubuntu 26.04, onde o libxml2 é o .so.16: a do
+# 24.04 procura o .so.2. O instalador do pacote usa a da versão do servidor.
+FROM ubuntu:26.04 AS modsec-ubuntu26.04
+ARG MODSEC_VERSION
+ARG MODSEC_SHA256
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl libpcre2-dev libxml2-dev libyajl-dev \
+        libcurl4-openssl-dev pkg-config \
+    && curl -fsSL -o /tmp/modsec.tar.gz "https://github.com/owasp-modsecurity/ModSecurity/releases/download/v${MODSEC_VERSION}/modsecurity-v${MODSEC_VERSION}.tar.gz" \
+    && echo "${MODSEC_SHA256}  /tmp/modsec.tar.gz" | sha256sum -c - \
+    && tar xzf /tmp/modsec.tar.gz -C /tmp \
+    && cd "/tmp/modsecurity-v${MODSEC_VERSION}" \
+    && ./configure --prefix=/usr/local/lsws/modsec --with-pcre2 --with-yajl --with-libxml \
+           --without-lua --without-maxmind --without-ssdeep --without-lmdb >/dev/null \
+    && make -j"$(nproc)" >/dev/null && make install >/dev/null \
+    && ldd /usr/local/lsws/modsec/lib/libmodsecurity.so.3 | grep -q "libxml2.so.16"
+
 FROM build AS runtime
 
 RUN cd /work/openlitespeed && ./install.sh
+ARG MODSEC_VERSION
+COPY --from=modsec-ubuntu26.04 /usr/local/lsws/modsec/lib/libmodsecurity.so.${MODSEC_VERSION} \
+     /usr/local/lsws/modsec/lib-ubuntu26.04/
+RUN cd /usr/local/lsws/modsec/lib-ubuntu26.04 \
+    && ln -s "libmodsecurity.so.${MODSEC_VERSION}" libmodsecurity.so.3 \
+    && ln -s "libmodsecurity.so.${MODSEC_VERSION}" libmodsecurity.so
 EXPOSE 8088 7080
 CMD ["/usr/local/lsws/bin/openlitespeed", "-n"]
 

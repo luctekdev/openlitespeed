@@ -28,6 +28,22 @@ command -v python3 >/dev/null || fail "a ponte precisa de python3"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+
+# libmodsecurity do WAF, compilada para a versão do sistema: o pacote traz a do Ubuntu
+# 24.04 em modsec/lib e as outras em modsec/lib-<id><versão> (o 26.04 trocou o libxml2
+# de .so.2 para .so.16). O mod_security.so a acha em $LSWS/modsec/lib pelo RPATH.
+install_modsec() {
+    src="$tmp/lsws/modsec"
+    [ -d "$src/lib" ] || return 0
+    variant=$(. /etc/os-release && echo "$src/lib-$ID$VERSION_ID")
+    [ -d "$variant" ] || variant="$src/lib"
+    mkdir -p "$LSWS/modsec/lib"
+    cp -a "$variant"/. "$LSWS/modsec/lib/"
+    rm -rf "$LSWS"/modsec/lib-*
+    if ldd "$LSWS/modsec/lib/libmodsecurity.so.3" 2>/dev/null | grep -q "not found"; then
+        echo "aviso: faltam bibliotecas do sistema para o WAF; 'olsbridge set waf detect' as instala."
+    fi
+}
 tar -xzf "$here/lsws.tgz" -C "$tmp"
 # O binário foi compilado em outro sistema: precisa rodar aqui antes de instalar.
 if ! "$tmp/lsws/bin/openlitespeed" -v >/dev/null 2>&1; then
@@ -42,6 +58,7 @@ if [ -e "$LSWS/bin/openlitespeed" ]; then
     install -m 755 "$tmp/lsws/bin/openlitespeed" "$LSWS/bin/openlitespeed.new"
     mv -f "$LSWS/bin/openlitespeed.new" "$LSWS/bin/openlitespeed"
     cp -f "$tmp/lsws/modules/"*.so "$LSWS/modules/" 2>/dev/null || true
+    install_modsec
     install -m 755 "$here/olsbridge" "$LSWS/bin/olsbridge"
     install_addons
     echo "Binário trocado (anterior: $LSWS/bin/openlitespeed.$stamp)."
@@ -61,6 +78,7 @@ openssl req -x509 -nodes -newkey rsa:2048 -days 3650 -subj "/CN=$(hostname -f 2>
     -keyout "$LSWS/admin/conf/webadmin.key" -out "$LSWS/admin/conf/webadmin.crt" >/dev/null 2>&1
 chown lsadm:lsadm "$LSWS/admin/conf/webadmin.key" "$LSWS/admin/conf/webadmin.crt"
 chmod 600 "$LSWS/admin/conf/webadmin.key" "$LSWS/admin/conf/webadmin.crt"
+install_modsec
 install -m 755 "$here/olsbridge" "$LSWS/bin/olsbridge"
 install_addons
 cp "$here/VERSION" "$LSWS/VERSION.olsbridge"
