@@ -1389,7 +1389,10 @@ static void addSuffixes(HttpContext *pContext, const char *pType,
         const char *pSuffix = args[i].c_str();
         if (*pSuffix == '.')
             ++pSuffix;
-        pContext->addMIME(pType, pSuffix);
+        if (strchr(pType, ';'))
+            pContext->addMIMEWithParams(pType, pSuffix);
+        else
+            pContext->addMIME(pType, pSuffix);
     }
 }
 

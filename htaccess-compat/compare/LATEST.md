@@ -1,11 +1,11 @@
 # Matriz de compatibilidade Apache x OLS
 
-Requisições idênticas: **109 de 111**.
+Requisições idênticas: **113 de 113**.
 
 | Grupo | Iguais | Total |
 |---|---|---|
 | aplicações reais | 20 | 20 |
-| core | 24 | 25 |
+| core | 25 | 25 |
 | mod_access_compat | 5 | 5 |
 | mod_alias | 12 | 12 |
 | mod_auth_basic | 6 | 6 |
@@ -15,15 +15,9 @@ Requisições idênticas: **109 de 111**.
 | mod_env | 2 | 2 |
 | mod_expires | 2 | 2 |
 | mod_headers | 9 | 9 |
-| mod_mime | 1 | 2 |
+| mod_mime | 4 | 4 |
 | mod_rewrite | 10 | 10 |
 | mod_setenvif | 2 | 2 |
 | segurança | 7 | 7 |
 
 ## Divergências
-
-### errordocument-text: `GET x`
-- content-type: apache='text/html; charset=iso-8859-1' ols='text/html'
-
-### addtype-charset: `GET index.html`
-- content-type: apache='text/html; charset=utf-8' ols='text/html'

@@ -914,6 +914,41 @@ const MimeSetting *HttpContext::addMIME(const char *pMime,
 }
 
 
+/**
+ * AddType 'text/html; charset=UTF-8' html: addMIME() looks the type up ignoring
+ * its parameters, finds the server's text/html and drops the charset. Here the
+ * type with its parameters goes to this context's own MIME map, inheriting the
+ * handler, compression and expires of the plain type, so the response says
+ * "text/html; charset=utf-8" as Apache does, and only in this context.
+ */
+const MimeSetting *HttpContext::addMIMEWithParams(const char *pMime,
+        const char *pSuffix)
+{
+    if (initMIME())
+        return NULL;
+    char achMime[1024];
+    char achBase[1024];
+    char achSuffix[256];
+    const char *pReason = NULL;
+    snprintf(achMime, sizeof(achMime), "%s", pMime);
+    snprintf(achBase, sizeof(achBase), "%s", pMime);
+    snprintf(achSuffix, sizeof(achSuffix), "%s", pSuffix);
+    char *p = strchr(achBase, ';');
+    if (p)
+    {
+        *p = 0;
+        while (p > achBase && isspace((unsigned char)p[-1]))
+            *--p = 0;
+    }
+    const MimeSetting *pProto = lookupMimeSetting(achBase);
+    MimeSetting *pSetting = m_pInternal->m_pMIME->addUpdateMIME(achSuffix,
+                            achMime, pReason, 1);
+    if (pSetting && pProto && pSetting != pProto)
+        pSetting->inherit(pProto, 0);
+    return pSetting;
+}
+
+
 int HttpContext::setExpiresByType(const char *pValue)
 {
     if (initMIME())

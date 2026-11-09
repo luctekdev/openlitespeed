@@ -364,6 +364,8 @@ public:
     int initMIME();
     const MimeSetting *addMIME(const char *pMime,
                                const char *pSuffix);
+    const MimeSetting *addMIMEWithParams(const char *pMime,
+                                         const char *pSuffix);
     int setExpiresByType(const char *pValue);
     int setCompressByType(const char *pValue);
 

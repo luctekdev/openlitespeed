@@ -138,17 +138,22 @@ int HttpMime::isValidMimeType(const char *pDescr)
     if (len == 0 || ! isValidToken(pDescr, len))
         return 0;
     ++pTemp;
-//    char* pTemp1;
-//    pTemp1 = strchr( pTemp, ';' );
-//
-//    if ( pTemp1 )
-//    {
-//        while( isspace( *(pTemp1 - 1) ))
-//            --pTemp1;
-//        len = pTemp1 - pTemp;
-//    }
-//    else
-    len = strlen(pTemp);
+    //Parameters, as in AddType 'text/html; charset=UTF-8' html, go out in the
+    //Content-Type header: only plain characters, never CR or LF.
+    const char *pParams = strchr(pTemp, ';');
+    if (pParams)
+    {
+        len = pParams - pTemp;
+        while (len > 0 && isspace((unsigned char)pTemp[len - 1]))
+            --len;
+        for (const char *q = pParams; *q; ++q)
+        {
+            if (!isalnum((unsigned char)*q) && !strchr(" ;=-_.+/", *q))
+                return 0;
+        }
+    }
+    else
+        len = strlen(pTemp);
     if (len <= 0 || ! isValidToken(pTemp, len))
         return 0;
     return 1;
@@ -1120,6 +1125,10 @@ bool HttpMime::needCharset(const char *pMimeType, int len)
 
     char ch = *pMimeType;
     if (ch != 't' && ch != 'a')
+        return false;
+    //A type that names its own charset (AddType 'text/html; charset=UTF-8')
+    //must not get the default one appended as well.
+    if (memmem(pMimeType, len, "charset=", 8) != NULL)
         return false;
     if (len >= 5 && strncmp(pMimeType, "text/", 5) == 0)
         return true;

@@ -278,7 +278,7 @@ class HttpSession
 
     void parseHost(char *pHost);
 
-    int  buildErrorResponse(const char *errMsg);
+    int  buildErrorResponse(const char *errMsg, bool errDocText = false);
 
     int  doRedirect();
     void postWriteEx();
@@ -428,7 +428,7 @@ private:
     int processURI(const char *pURI);
     int readToHeaderBuf();
     int sendHttpError(const char *pAdditional);
-    int sendDefaultErrorPage(const char *pAdditional);
+    int sendDefaultErrorPage(const char *pAdditional, bool errDocText = false);
     void send_100_continue();
 
     int detectTimeout();

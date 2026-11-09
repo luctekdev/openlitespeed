@@ -278,6 +278,11 @@ CASES = [
     dict(name="addtype-charset", group="mod_mime",
          htaccess="AddDefaultCharset Off\nAddType 'text/html; charset=UTF-8' html\n",
          requests=[get("index.html")]),
+    # O charset do AddType vence o padrão (sem charset duplicado); os outros tipos
+    # do diretório seguem com o padrão.
+    dict(name="addtype-charset-default", group="mod_mime",
+         htaccess="AddDefaultCharset UTF-8\nAddType 'text/html; charset=ISO-8859-1' html\n",
+         requests=[get("index.html"), get("page.txt")]),
     dict(name="redirect-permanent", group="mod_alias",
          htaccess="RedirectPermanent {base}/old {base}/new\nRedirectTemp {base}/tmp {base}/t\n",
          requests=[get("old"), get("tmp")]),

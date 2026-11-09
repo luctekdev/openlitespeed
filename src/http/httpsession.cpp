@@ -3031,7 +3031,7 @@ int HttpSession::sendHttpError(const char *pAdditional)
         if (*pErrDoc->c_str() == '"')
         {
             pAdditional = pErrDoc->c_str() + 1;
-            return sendDefaultErrorPage(pAdditional);
+            return sendDefaultErrorPage(pAdditional, true);
         }
         m_request.setErrorPage();
         if ((statusCode >= SC_300) && (statusCode <= SC_403))
@@ -3065,11 +3065,12 @@ int HttpSession::sendHttpError(const char *pAdditional)
 }
 
 
-int HttpSession::sendDefaultErrorPage(const char * pAdditional)
+int HttpSession::sendDefaultErrorPage(const char * pAdditional,
+                                      bool errDocText)
 {
     m_request.orContextState(SERVER_ERROR_PAGE);
     setState(HSS_WRITING);
-    buildErrorResponse(pAdditional);
+    buildErrorResponse(pAdditional, errDocText);
     endResponse(1);
     HttpStats::getReqStats()->incReqProcessed();
     return 0;
@@ -3091,7 +3092,7 @@ void HttpSession::send_100_continue()
 }
 
 
-int HttpSession::buildErrorResponse(const char *errMsg)
+int HttpSession::buildErrorResponse(const char *errMsg, bool errDocText)
 {
     int errCode = m_request.getStatusCode();
 
@@ -3148,7 +3149,12 @@ int HttpSession::buildErrorResponse(const char *errMsg)
         {
             pBody = errMsg;
             len = strlen(errMsg);
-            m_response.setContentTypeHeader("text/html", 9, NULL);
+            //Apache labels the text of `ErrorDocument 403 "..."` as Latin-1.
+            if (errDocText)
+                m_response.setContentTypeHeader("text/html; charset=iso-8859-1",
+                                                29, NULL);
+            else
+                m_response.setContentTypeHeader("text/html", 9, NULL);
         }
         else
         {
