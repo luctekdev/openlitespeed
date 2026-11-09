@@ -11,7 +11,7 @@ tempo de uso real (abaixo). O isolamento de recursos por cliente, que faltava, e
 
 | Área | O que existe | Como foi validado |
 |---|---|---|
-| Compatibilidade | `.htaccess` do Apache no OLS: rewrite, `Files`/`FilesMatch`, `Require`/`Allow`, `IfVersion`, `Header`, `SetEnv`, `ErrorDocument`, `Redirect*`, `php_value` | 109 de 111 requisições iguais ao Apache 2.4; WordPress, Laravel, PrestaShop e Magento 2.4 conferidos |
+| Compatibilidade | `.htaccess` do Apache no OLS: rewrite, `Files`/`FilesMatch`, `Require`/`Allow`, `IfVersion`, `Header`, `SetEnv`, `ErrorDocument`, `Redirect*`, `php_value` | 113 de 113 requisições iguais ao Apache 2.4; WordPress, Laravel, PrestaShop e Magento 2.4 conferidos |
 | PHP | lsphp por pool do PHP-FPM, com o usuário, o `php.ini`, o `open_basedir` e o `.user.ini` do site; troca de versão pelo painel | Fluxos do painel no itzvpc2 (versão, `php.ini`, pool, criar e apagar domínio) |
 | Painel | Comandos `v-*`, página OpenLiteSpeed, lista de serviços, tela de status, ícone na barra; voltam sozinhos depois de atualizações do HestiaCP | itzvpc2 |
 | Desempenho | LSCache, Brotli, HTTP/3, WebP automático, cache de estáticos em memória pela RAM | PageSpeed mobile 75 → 96 (mediana de 5); estático 296 → 41.000 req/s; home com LSCache 52.000 req/s |
@@ -43,8 +43,9 @@ tempo de uso real (abaixo). O isolamento de recursos por cliente, que faltava, e
 - **DirectAdmin** não foi testado.
 - **Saída para a internet bloqueada.** Na subida, o OLS baixa a lista de IPs do QUIC.cloud e espera até 10 s se não
   conseguir; a instalação já espera 30 s por isso.
-- **Diferenças conhecidas do Apache:** charset em `AddType`, `Options FollowSymLinks`/`MultiViews` ignorados,
-  `php_admin_value` em `.htaccess` ignorado (o Apache dá 500). Lista completa em
+- **Diferenças conhecidas do Apache:** `Options MultiViews` ignorado; links simbólicos seguem a regra do servidor
+  (só com o mesmo dono), não o `FollowSymLinks` do `.htaccess`; `php_admin_value` em `.htaccess` ignorado (o Apache
+  dá 500). Lista completa em
   [`../doc/htaccess-compat/DESIGN.md`](../doc/htaccess-compat/DESIGN.md).
 - **Configure Server → Web Server do HestiaCP:** trocar ali o servidor web enquanto a ponte está ativa não é suportado;
   use a página OpenLiteSpeed.
