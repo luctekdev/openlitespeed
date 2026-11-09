@@ -1,0 +1,69 @@
+#!/bin/bash
+# info: purge the LiteSpeed cache of a web domain (olsbridge)
+# options: USER DOMAIN [PATH]
+# labels: hestia web
+#
+# example: v-delete-web-domain-litespeed-cache admin example.com /blog
+#
+# Removes the cached pages of the domain and its aliases, or only those of PATH and
+# below it (/blog covers /blog and /blog/post, not /blog2). The next visit is served
+# by the site and cached again. Prints how many entries were removed.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+user=$1
+domain=$2
+domain_idn=$2
+path=$3
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+# shellcheck source=/usr/local/hestia/func/domain.sh
+source $HESTIA/func/domain.sh
+# load config file
+source_conf "$HESTIA/conf/hestia.conf"
+
+# Additional argument formatting
+format_domain
+format_domain_idn
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+check_args '2' "$#" 'USER DOMAIN [PATH]'
+is_format_valid 'user' 'domain'
+is_object_valid 'user' 'USER' "$user"
+is_object_valid 'web' 'DOMAIN' "$domain"
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+output=$("$OLSBRIDGE" cache-purge -- "$domain_idn" "$path" 2>&1)
+result=$?
+if [ "$result" -ne 0 ]; then
+	check_result "$result" "$output"
+fi
+echo "$output"
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+$BIN/v-log-action "$user" "Info" "Web" "LiteSpeed cache purged (Domain: $domain, Path: ${path:-/}, Entries: $output)."
+log_event "$OK" "$ARGUMENTS"
+
+exit

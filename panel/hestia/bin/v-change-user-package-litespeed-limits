@@ -1,0 +1,114 @@
+#!/bin/bash
+# info: change the CPU, memory, process and disk limits of a package (olsbridge)
+# options: PACKAGE CPU MEMORY [TASKS] [IO] [IOPS]
+# labels: hestia users
+#
+# example: v-change-user-package-litespeed-limits default 200% 2G 400 50M 1000
+#
+# CPU      percent of one core (100% = 1 core, 200% = 2) or "unlimited"
+# MEMORY   RAM of the user's PHP, as 512M or 2G, or "unlimited"
+# TASKS    processes and threads, or "default"
+# IO       disk read and write bandwidth per second, as 50M, or "default"
+# IOPS     disk operations per second, or "default"
+#
+# CPU and MEMORY go to the package (CPU_QUOTA, MEMORY_LIMIT; SWAP_LIMIT follows at a
+# quarter of the memory) and to every user of it, as v-update-user-package does.
+# TASKS, IO and IOPS are kept by the bridge per package. "unlimited" and "default"
+# mean the server's default (v-change-sys-litespeed-option limit_*). The new limits
+# apply to the users' running PHP at once, without restarting it.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+package=$1
+cpu=$2
+memory=$3
+tasks=${4-}
+io=${5-}
+iops=${6-}
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+# load config file
+source_conf "$HESTIA/conf/hestia.conf"
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+PKG="$HESTIA/data/packages/$package.pkg"
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+check_args '3' "$#" 'PACKAGE CPU MEMORY [TASKS] [IO] [IOPS]'
+is_format_valid 'package'
+is_package_valid
+if ! [[ "$cpu" =~ ^([1-9][0-9]{0,4}%|unlimited)$ ]]; then
+	check_result "$E_INVALID" "invalid CPU: $cpu (200% or unlimited)"
+fi
+if ! [[ "$memory" =~ ^([1-9][0-9]{0,5}[MG]|unlimited)$ ]]; then
+	check_result "$E_INVALID" "invalid memory: $memory (512M, 2G or unlimited)"
+fi
+if [ -n "$tasks" ] && ! [[ "$tasks" =~ ^([1-9][0-9]{0,5}|default)$ ]]; then
+	check_result "$E_INVALID" "invalid tasks: $tasks"
+fi
+if [ -n "$io" ] && ! [[ "$io" =~ ^([1-9][0-9]{0,5}[KMG]|default)$ ]]; then
+	check_result "$E_INVALID" "invalid io: $io (50M or default)"
+fi
+if [ -n "$iops" ] && ! [[ "$iops" =~ ^([1-9][0-9]{0,6}|default)$ ]]; then
+	check_result "$E_INVALID" "invalid iops: $iops"
+fi
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+# Perform verification if read-only mode is enabled
+check_hestia_demo_mode
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+# Swap: a quarter of the memory, as the bridge does when the package has none.
+swap=unlimited
+if [ "$memory" != 'unlimited' ]; then
+	number=${memory%[MG]}
+	unit=${memory: -1}
+	[ "$unit" = 'G' ] && number=$((number * 1024))
+	swap="$(((number + 3) / 4))M"
+fi
+
+set_pkg_value() {
+	if grep -q "^$1=" "$PKG"; then
+		sed -i "s/^$1=.*/$1='$2'/" "$PKG"
+	else
+		echo "$1='$2'" >> "$PKG"
+	fi
+}
+set_pkg_value CPU_QUOTA "$cpu"
+set_pkg_value MEMORY_LIMIT "$memory"
+set_pkg_value SWAP_LIMIT "$swap"
+
+# Copies the package to each of its users (user.conf), as the panel does.
+$BIN/v-update-user-package "$package" > /dev/null 2>&1
+
+output=$("$OLSBRIDGE" plan-limits "$package" ${tasks:+--tasks "$tasks"} ${io:+--io "$io"} \
+	${iops:+--iops "$iops"} 2>&1)
+result=$?
+if [ "$result" -ne 0 ]; then
+	check_result "$E_RESTART" "$output"
+fi
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+$BIN/v-log-action "system" "Info" "Users" "Package limits changed (Package: $package, CPU: $cpu, Memory: $memory, Tasks: ${tasks:-unchanged}, IO: ${io:-unchanged}, IOPS: ${iops:-unchanged})."
+log_event "$OK" "$ARGUMENTS"
+
+exit

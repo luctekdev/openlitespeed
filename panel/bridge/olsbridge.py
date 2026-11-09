@@ -1113,6 +1113,26 @@ def size_bytes(text):
     return int(match.group(1)) * 1024 ** " KMGT".index(match.group(2) or " ")
 
 
+LIMIT_PLANS = os.path.join(LSWS, "conf", "limit-plans")
+LIMITS_HISTORY = os.path.join(LSWS, "conf", "limits-history.json")
+PLAN_LIMIT_RE = {"tasks": r"^[1-9]\d{0,5}$", "io": r"^[1-9]\d{0,5}[KMG]$", "iops": r"^[1-9]\d{0,6}$"}
+PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def package_extra_limits(package):
+    """Processos, disco e IOPS de um plano (olsbridge plan-limits)."""
+    import json
+    if not package or not PACKAGE_RE.match(package):
+        return {}
+    try:
+        with open(os.path.join(LIMIT_PLANS, package + ".json"), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return dict((k, v) for k, v in data.items()
+                if k in PLAN_LIMIT_RE and re.match(PLAN_LIMIT_RE[k], str(v)))
+
+
 def user_limits(user, settings, warnings):
     """Limites de um usuário: os do plano do HestiaCP (que o painel copia no user.conf)
     quando não são unlimited, senão os padrões da ponte. None: sem limite."""
@@ -1134,9 +1154,14 @@ def user_limits(user, settings, warnings):
     pick("cpu_period", None, "CPU_QUOTA_PERIOD", r"^\d+(?:ms|s)$")
     pick("mem", "limit_mem", "MEMORY_LIMIT", r"^\d+[KMGTkmgt]?$")
     pick("swap", None, "SWAP_LIMIT", r"^\d+[KMGTkmgt]?$")
-    pick("tasks", "limit_tasks", None, "")
-    pick("io", "limit_io", None, "")
-    pick("iops", "limit_iops", None, "")
+    # Processos, disco e IOPS por plano: o plano do HestiaCP não tem esses campos, e o
+    # v-add-user-package apagaria campos desconhecidos; ficam em conf/limit-plans.
+    plan = package_extra_limits(found["package"])
+    for name in ("tasks", "io", "iops"):
+        if plan.get(name):
+            found[name], found[name + "_from"] = plan[name], "package"
+        else:
+            pick(name, "limit_" + name, None, "")
     # O MemoryMax só conta a RAM: sem teto de swap, o que passa dele vai para o swap
     # (medido: 1,1 GB de 3 GB), e o disco de todos paga. Padrão: um quarto da memória.
     if found["swap"] is None and size_bytes(found["mem"]):
@@ -1256,12 +1281,87 @@ def cgroup_keyed(text):
     return found
 
 
-def limits_report():
+LIMIT_COUNTERS = ("cpu_usec", "throttled_usec", "memory_high_events", "oom_kills")
+
+
+def limit_counters(uid):
+    cg = os.path.join(CGROUP_ROOT, "user.slice", "user-%d.slice" % uid)
+    cpu = cgroup_keyed(read_cgroup(cg, "cpu.stat"))
+    events = cgroup_keyed(read_cgroup(cg, "memory.events"))
+    return [cpu.get("usage_usec", 0), cpu.get("throttled_usec", 0), events.get("high", 0),
+            events.get("oom_kill", 0)]
+
+
+def load_limits_history():
+    import json
+    try:
+        with open(LIMITS_HISTORY, encoding="utf-8") as handle:
+            data = json.load(handle)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_limits_history(now=None):
+    """Uma amostra dos contadores de cada fatia a cada 5 minutos, guardando 75 minutos,
+    e a hora do último OOM (visto a cada sync, 30 s): os contadores do cgroup somam
+    desde que a fatia subiu e não dizem se o aperto é de agora."""
+    import json
+    now = int(now or time.time())
+    data = load_limits_history()
+    samples, last_oom, seen = (data.get("samples", {}), data.get("last_oom", {}),
+                               data.get("oom_seen", {}))
+    alive = set()
+    for uid in limit_dropins():
+        key = str(uid)
+        alive.add(key)
+        current = limit_counters(uid)
+        oom = current[3]
+        if key in seen and oom > seen[key]:
+            last_oom[key] = now
+        seen[key] = oom
+        rows = samples.get(key, [])
+        if not rows or now - rows[-1][0] >= 300:
+            rows.append([now] + current)
+        samples[key] = [r for r in rows if now - r[0] <= 4500]
+    data = {"samples": dict((k, v) for k, v in samples.items() if k in alive),
+            "last_oom": dict((k, v) for k, v in last_oom.items() if k in alive),
+            "oom_seen": dict((k, v) for k, v in seen.items() if k in alive)}
+    tmp = LIMITS_HISTORY + ".new"
+    with open(tmp, "w", encoding="utf-8") as handle:
+        json.dump(data, handle)
+    os.rename(tmp, LIMITS_HISTORY)
+
+
+def last_hour(history, uid, current, now=None):
+    """Os contadores na última hora: o atual menos a amostra mais nova com uma hora ou
+    mais (ou a mais velha, se ainda não há uma hora de histórico). Fatia recriada (o
+    contador voltou): conta desde a recriação."""
+    now = int(now or time.time())
+    rows = history.get("samples", {}).get(str(uid), [])
+    if not rows:
+        return None
+    base = rows[0]
+    for row in rows:
+        if now - row[0] >= 3600:
+            base = row
+    out = {"seconds": now - base[0]}
+    for i, name in enumerate(LIMIT_COUNTERS):
+        before = base[i + 1]
+        out[name] = current[i] - before if current[i] >= before else current[i]
+    return out
+
+
+def limits_report(only_uid=None):
     """Limites e consumo de cada usuário com fatia da ponte: CPU usada e freada (segundos
-    desde que a fatia subiu), memória, processos e mortes por falta de memória."""
+    desde que a fatia subiu), memória, processos e mortes por falta de memória, e os
+    mesmos contadores na última hora."""
     import json
     rows = []
+    history = load_limits_history()
     for uid, path in sorted(limit_dropins().items()):
+        if only_uid is not None and uid != only_uid:
+            continue
         try:
             with open(path, encoding="utf-8") as handle:
                 head = handle.readline()
@@ -1288,6 +1388,10 @@ def limits_report():
                     "oom_kills": events.get("oom_kill", 0),
                     "tasks_now": int(tasks) if tasks.isdigit() else 0,
                     "processes": procs})
+        current = [row[k] for k in LIMIT_COUNTERS]
+        row["last_hour"] = last_hour(history, uid, current)
+        stamp = history.get("last_oom", {}).get(str(uid))
+        row["last_oom"] = iso_local(stamp) if stamp else None
         rows.append(row)
     return rows
 
@@ -2861,8 +2965,8 @@ def waf_server():
     return build(config)
 
 
-def waf_require(domain, server=None):
-    if not os.path.exists(os.path.join(LSWS, "modules", "mod_security.so")):
+def waf_require(domain, server=None, need_waf=True):
+    if need_waf and not os.path.exists(os.path.join(LSWS, "modules", "mod_security.so")):
         raise WafError(3, "WAF indisponível: este OpenLiteSpeed não tem o mod_security")
     domain = (domain or "").lower()
     if not DOMAIN_RE.match(domain):
@@ -2927,6 +3031,7 @@ def cmd_waf_site(settings, args):
             data["exclusions"].append(ex)
             waf_site_save(data)
         waf_apply(settings, False)
+        cache_purge(domain)  # uma resposta guardada não passa pelo WAF
         print(ex["id"])
         return 0
     if action == "delete":
@@ -2940,6 +3045,7 @@ def cmd_waf_site(settings, args):
             data["exclusions"] = kept
             waf_site_save(data)
         waf_apply(settings, False)
+        cache_purge(domain)
         return 0
     if action == "mode":
         mode = args.rule
@@ -2953,6 +3059,7 @@ def cmd_waf_site(settings, args):
             waf_site_save(data)
         effective = server_mode if mode == "inherit" else mode
         waf_apply(settings, effective != "off")
+        cache_purge(domain)
         return 0
     raise WafError(2, "ação inválida")
 
@@ -3549,6 +3656,9 @@ HESTIA_FILES = [
     "bin/v-add-web-domain-litespeed-waf-exclusion",
     "bin/v-delete-web-domain-litespeed-waf-exclusion",
     "bin/v-change-web-domain-litespeed-waf",
+    "bin/v-delete-web-domain-litespeed-cache",
+    "bin/v-list-user-litespeed-limits",
+    "bin/v-change-user-package-litespeed-limits",
     "web/edit/server/litespeed/index.php",
     "web/templates/pages/edit_server_litespeed.php",
 ]
@@ -3865,7 +3975,9 @@ def cmd_status(settings, as_json=False):
     return 0 if pid else 3
 
 
-def cmd_limits(settings, as_json=False):
+def cmd_limits(settings, as_json=False, user=None):
+    if user:
+        return cmd_user_limits(settings, user)
     rows = limits_report()
     if as_json:
         import json
@@ -3889,6 +4001,138 @@ def cmd_limits(settings, as_json=False):
     for row in table:
         print("  ".join(str(c).ljust(w) for c, w in zip(row, widths)).rstrip())
     print("* valor do plano do HestiaCP; os demais são os padrões (olsbridge set limit_*)")
+    return 0
+
+
+def cmd_user_limits(settings, user):
+    """A linha de limits de um usuário só (o portal não precisa ler o servidor todo).
+    Sem fatia ainda (sem PHP ativo, limits off): os limites que valeriam e consumo zero."""
+    import json
+    try:
+        entry = pwd.getpwnam(user)
+    except KeyError:
+        print("usuário %s não existe" % user, file=sys.stderr)
+        return 3
+    rows = limits_report(entry.pw_uid)
+    if rows:
+        row = rows[0]
+    else:
+        limits = user_limits(user, settings, [])
+        row = dict((k, limits.get(k)) for k in LIMIT_KEYS + ("user", "package"))
+        row.update({"uid": entry.pw_uid,
+                    "from": dict((k, limits.get(k + "_from")) for k in LIMIT_KEYS),
+                    "active": False, "memory": 0, "tasks_now": 0, "processes": 0,
+                    "last_hour": None, "last_oom": None})
+        row.update(dict((k, 0) for k in LIMIT_COUNTERS))
+    row["limits"] = settings.get("limits", DEFAULTS["limits"])
+    print(json.dumps(row, indent=1))
+    return 0
+
+
+def cmd_plan_limits(settings, package, values):
+    """Processos, disco e IOPS de um plano (CPU e memória ficam no plano do HestiaCP).
+    default tira o valor do plano e volta ao padrão do servidor. Aplica na hora."""
+    import json
+    if not PACKAGE_RE.match(package or ""):
+        print("plano inválido", file=sys.stderr)
+        return 2
+    if os.path.isdir(HESTIA) and not os.path.exists(
+            os.path.join(HESTIA, "data", "packages", package + ".pkg")):
+        print("plano %s não existe" % package, file=sys.stderr)
+        return 3
+    data = package_extra_limits(package)
+    for name, value in values.items():
+        if value is None:
+            continue
+        if value == "default":
+            data.pop(name, None)
+        elif re.match(PLAN_LIMIT_RE[name], value):
+            data[name] = value
+        else:
+            print("%s inválido: %s" % (name, value), file=sys.stderr)
+            return 2
+    os.makedirs(LIMIT_PLANS, exist_ok=True)
+    path = os.path.join(LIMIT_PLANS, package + ".json")
+    if data:
+        tmp = path + ".new"
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, sort_keys=True)
+        os.rename(tmp, path)
+    elif os.path.exists(path):
+        os.remove(path)
+    with bridge_lock():
+        generate(settings, quiet=True)  # os limites vão para as fatias na hora
+    print(json.dumps(data, sort_keys=True))
+    return 0
+
+
+def cache_dirs(domain):
+    """Pastas do LSCache do domínio (os aliases usam as mesmas): HTTP e HTTPS."""
+    base = os.path.join(LSWS, "cachedata", domain)
+    return [d for d in (base, base + "-ssl") if os.path.isdir(d)]
+
+
+def cache_entry_uri(path):
+    """O caminho (sem a query) de uma entrada do LSCache: 4 bytes de marca, o CeHeader
+    (64 bytes no x86_64) e a chave. A chave é host:porta, a URI, ?query, #vary e, no
+    fim, ~cookie privado e @IP; m_keyLen e m_iPrivLen (offsets 14 e 38 do CeHeader) dão
+    o tamanho dela e do trecho privado. Visto numa entrada real:
+    alpha.test:80/blog/c2.php#_lscache_vary;@172.17.0.2"""
+    import struct
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(68 + 65536)
+    except OSError:
+        return None
+    if len(head) < 68 or head[:4] != b"LSCH":
+        return None
+    key_len = struct.unpack_from("<H", head, 4 + 14)[0]
+    priv_len = struct.unpack_from("<h", head, 4 + 38)[0]
+    if not 0 <= priv_len <= key_len or len(head) < 68 + key_len:
+        return None
+    key = head[68:68 + key_len - priv_len].decode("latin-1")
+    slash = key.find("/")
+    if slash < 0:
+        return None
+    uri = key[slash:]
+    for mark in ("?", "#"):
+        uri = uri.split(mark, 1)[0]
+    return uri
+
+
+def cache_purge(domain, path=None):
+    """Apaga as entradas do LSCache do domínio, ou só as do caminho e abaixo dele. O
+    OLS trata a entrada que sumiu como falta e guarda de novo na próxima visita."""
+    removed = 0
+    prefix = None if not path or path == "/" else path.rstrip("/")
+    for root in cache_dirs(domain):
+        for base, _dirs, names in os.walk(root):
+            for name in names:
+                if name.startswith(".cacheman"):
+                    continue
+                entry = os.path.join(base, name)
+                if prefix is not None:
+                    uri = cache_entry_uri(entry)
+                    if uri is None or not (uri == prefix or uri.startswith(prefix + "/")):
+                        continue
+                try:
+                    os.remove(entry)
+                    removed += 1
+                except OSError:
+                    pass
+    return removed
+
+
+def cmd_cache_purge(settings, domain, path):
+    try:
+        domain, _hosts = waf_require(domain, need_waf=False)
+    except WafError as err:
+        print(err, file=sys.stderr)
+        return err.code
+    if path and (len(path) > 200 or not SAFE_PATH.match(path)):
+        print("caminho inválido", file=sys.stderr)
+        return 2
+    print(cache_purge(domain, path or None))
     return 0
 
 
@@ -4446,6 +4690,15 @@ def main(argv=None):
     sub.add_parser("stats", help="tempo real, bloqueios e WAF, em JSON")
     limits = sub.add_parser("limits", help="limites e consumo de CPU, memória e disco por usuário")
     limits.add_argument("--json", action="store_true")
+    limits.add_argument("--user", help="só este usuário, em JSON")
+    plan = sub.add_parser("plan-limits", help="processos, disco e IOPS de um plano")
+    plan.add_argument("package")
+    plan.add_argument("--tasks")
+    plan.add_argument("--io")
+    plan.add_argument("--iops")
+    purge = sub.add_parser("cache-purge", help="limpa o LSCache de um domínio ou de um caminho")
+    purge.add_argument("domain")
+    purge.add_argument("path", nargs="?")
     sub.add_parser("status-html", help="status para a tela Server > web do HestiaCP")
     wafsite = sub.add_parser("waf-site", help="WAF de um site: show, add, delete, mode")
     wafsite.add_argument("action", choices=("show", "add", "delete", "mode"))
@@ -4477,7 +4730,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     settings = Settings.load()
     if args.command == "limits":
-        return cmd_limits(settings, args.json)
+        return cmd_limits(settings, args.json, args.user)
+    if args.command == "plan-limits":
+        return cmd_plan_limits(settings, args.package,
+                               {"tasks": args.tasks, "io": args.io, "iops": args.iops})
     if args.command not in ("status", "hestia-integrate", "stats", "hestia-services",
                             "status-html") and \
             not settings.get("apache_conf"):
@@ -4496,7 +4752,14 @@ def main(argv=None):
         return cmd_stop(settings)
     if args.command == "reload":
         return cmd_reload(settings)
+    if args.command == "cache-purge":
+        return cmd_cache_purge(settings, args.domain, args.path)
     if args.command == "sync":
+        if cgroup_v2() and os.geteuid() == 0:
+            try:
+                record_limits_history()
+            except OSError:
+                pass
         if settings.get("php", "lsphp") == "lsphp":
             ensure_lsphp(once=True)
         ensure_webp_timer(settings)

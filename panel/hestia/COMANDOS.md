@@ -17,6 +17,9 @@ os tocam.
 | `v-change-sys-litespeed-option` | `OPÇÃO VALOR` | Muda uma opção (tabela abaixo) |
 | `v-restart-sys-litespeed` | — | Regenera a configuração e reinicia o OLS sem derrubar conexões |
 | `v-restart-sys-litespeed-php` | `[VERSÃO]` | Reinicia o lsphp de uma versão (`8.2`) ou de todas |
+| `v-delete-web-domain-litespeed-cache` | `USER DOMAIN [CAMINHO]` | Limpa o LSCache do site, ou só de CAMINHO e abaixo dele. Imprime quantas entradas saíram |
+| `v-list-user-litespeed-limits` | `USER [FORMAT]` | Limites e consumo de uma conta, com a última hora (JSON) |
+| `v-change-user-package-litespeed-limits` | `PACOTE CPU MEMÓRIA [TASKS] [IO] [IOPS]` | Limites de um plano, aplicados na hora a todas as contas dele |
 
 Opções de `v-change-sys-litespeed-option`:
 
@@ -181,8 +184,74 @@ Detalhes:
   1010000, estáveis por exclusão.
 - **Histórico**: o log de auditoria gira todo dia e guarda 8 dias (`/etc/logrotate.d/olsbridge-modsec`), o que
   cobre as 168 h.
+- **Cache**: adicionar ou apagar uma exclusão e mudar o modo limpam o LSCache do site. Uma página servida do
+  cache não passa pelo WAF, então sem isso a mudança só valeria quando a página expirasse.
 - Na ponte, o mesmo pela linha de comando: `olsbridge waf-site show|add|delete|mode DOMAIN ...` e
   `olsbridge waf-log --hours N`.
+
+## Cache e limites por conta e por plano
+
+Pedidos novos de `ESPEC-WAF-PONTE.md`.
+
+### `v-delete-web-domain-litespeed-cache USER DOMAIN [CAMINHO]`
+
+Apaga as páginas guardadas do domínio e dos aliases (HTTP e HTTPS). Com CAMINHO, só as daquele caminho e abaixo
+dele: `/blog` limpa `/blog` e `/blog/post`, não `/blog2`; a query não conta, então `/busca` limpa também
+`/busca?q=x`. Imprime o número de entradas apagadas (`0` quando nada estava guardado). A próxima visita é
+atendida pelo site e guardada de novo. Saída `3` quando o usuário ou o domínio não existe ou o domínio não é do
+usuário; `2` para caminho inválido (as mesmas regras do caminho do WAF). Ponte: `olsbridge cache-purge DOMAIN
+[CAMINHO]`.
+
+### `v-list-user-litespeed-limits USER json`
+
+A mesma linha de `limits` de `v-list-sys-litespeed json`, de um usuário só. Saída `3` quando o usuário não
+existe.
+
+```json
+{
+ "user": "testehes",
+ "package": "default",
+ "uid": 1003,
+ "cpu": "200%", "mem": "2G", "tasks": "400", "io": "50M", "iops": "1000",
+ "from": {"cpu": "default", "mem": "default", "tasks": "default", "io": "default", "iops": "default"},
+ "active": true,
+ "memory": 41943040, "tasks_now": 7, "processes": 3,
+ "cpu_usec": 18234000, "throttled_usec": 0, "memory_high_events": 0, "oom_kills": 0,
+ "last_hour": {"seconds": 3600, "cpu_usec": 2410000, "throttled_usec": 0, "memory_high_events": 0,
+               "oom_kills": 0},
+ "last_oom": null,
+ "limits": "on"
+}
+```
+
+- `from`: `package` quando o valor veio do plano, `default` quando veio de `limit_*` do servidor.
+- `cpu_usec`, `throttled_usec` (tempo em que a CPU foi freada pelo limite), `memory_high_events` e `oom_kills`
+  contam desde que a fatia do usuário subiu (boot ou primeira requisição PHP). `last_hour` traz os mesmos quatro
+  na última hora: a ponte guarda uma amostra a cada 5 minutos no ciclo de 30 s, em
+  `/usr/local/lsws/conf/limits-history.json`. `seconds` diz quantos segundos a conta cobre (menos de 3600 na
+  primeira hora depois de instalar); `last_hour` é `null` enquanto não há amostra. Um contador que voltou a zero (fatia reiniciada)
+  conta a partir do zero.
+- `last_oom`: data da última morte por falta de memória que a ponte viu, ou `null`. Fica guardada no histórico,
+  mesmo depois de a fatia reiniciar.
+- Sem fatia (usuário sem PHP rodando, ou `limits` em `off`): `active: false`, os limites que valeriam e consumo `0`.
+
+### Limites de um plano
+
+`v-change-user-package-litespeed-limits PACOTE CPU MEMÓRIA [TASKS] [IO] [IOPS]`, por exemplo
+`v-change-user-package-litespeed-limits default 200% 2G 400 50M 1000`:
+
+- `CPU`: porcentagem de um núcleo (`100%` = 1 núcleo) ou `unlimited`. `MEMÓRIA`: `512M`, `2G` ou `unlimited`.
+  `unlimited` quer dizer o padrão do servidor (`limit_cpu`, `limit_mem`).
+- CPU e memória vão para o plano do HestiaCP (`CPU_QUOTA`, `MEMORY_LIMIT`, e `SWAP_LIMIT` com um quarto da
+  memória) e o comando roda `v-update-user-package PACOTE`, que copia o plano para o `user.conf` de cada conta.
+- `TASKS`, `IO` e `IOPS` o HestiaCP não tem; a ponte guarda por plano em `/usr/local/lsws/conf/limit-plans/`.
+  Omitidos, ficam como estão; `default` volta ao padrão do servidor.
+- Aplica na hora em todas as contas do plano, sem reiniciar o PHP delas e sem esperar o ciclo de 30 s.
+- Saída `2` valor inválido, `3` plano que não existe, `20` falha ao aplicar.
+
+Pelo HestiaCP puro, o mesmo para CPU e memória: `v-add-user-package ARQUIVO PACOTE yes` (reescreve o `.pkg`)
+seguido de `v-update-user-package PACOTE`. Aí a ponte aplica no próximo ciclo, em até 30 s. Ponte:
+`olsbridge plan-limits PACOTE [--tasks N] [--io 50M] [--iops N]`.
 
 ## Mudanças em comandos e telas do HestiaCP
 

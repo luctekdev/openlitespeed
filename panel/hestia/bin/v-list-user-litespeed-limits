@@ -1,0 +1,58 @@
+#!/bin/bash
+# info: CPU, memory, process and disk limits and usage of one user (olsbridge)
+# options: USER [FORMAT]
+# labels: hestia users
+#
+# example: v-list-user-litespeed-limits admin json
+#
+# The same entry as in the "limits" list of v-list-sys-litespeed, for one user only:
+# limits and where each one comes from (package or server default), usage since the
+# user's slice started, the same counters over the last hour, and the time of the last
+# out-of-memory kill. JSON is the only format.
+# Installed by olsbridge (github.com/luctekdev/openlitespeed, panel/).
+
+#----------------------------------------------------------#
+#                Variables & Functions                     #
+#----------------------------------------------------------#
+
+# Argument definition
+user=$1
+format=${2-json}
+
+# Includes
+# shellcheck source=/etc/hestiacp/hestia.conf
+source /etc/hestiacp/hestia.conf
+# shellcheck source=/usr/local/hestia/func/main.sh
+source $HESTIA/func/main.sh
+# load config file
+source_conf "$HESTIA/conf/hestia.conf"
+
+OLSBRIDGE=/usr/local/lsws/bin/olsbridge
+
+#----------------------------------------------------------#
+#                    Verifications                         #
+#----------------------------------------------------------#
+
+check_args '1' "$#" 'USER [FORMAT]'
+is_format_valid 'user'
+is_object_valid 'user' 'USER' "$user"
+if [ ! -x "$OLSBRIDGE" ]; then
+	check_result "$E_NOTEXIST" "olsbridge is not installed"
+fi
+
+#----------------------------------------------------------#
+#                       Action                             #
+#----------------------------------------------------------#
+
+output=$("$OLSBRIDGE" limits --user "$user" 2>&1)
+result=$?
+if [ "$result" -ne 0 ]; then
+	check_result "$result" "$output"
+fi
+echo "$output"
+
+#----------------------------------------------------------#
+#                       Hestia                             #
+#----------------------------------------------------------#
+
+exit
